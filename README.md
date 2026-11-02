@@ -116,6 +116,7 @@ scripts/package.sh        # 在 macOS 上本地构建发布产物到 dist/
 | CI | 推送到 main、Pull Request | fmt、clippy；Linux / macOS / Windows 测试；端到端测试 |
 | Release | 推送 `v*` 标签 | 构建全部平台，附校验和发布到 Releases |
 | Release（手动运行） | Actions 页面 | 只构建产物，不发布 |
+| Website | `site/` 有改动并推送到 main | 部署官网到 GitHub Pages |
 
 发布新版本：修改 `Cargo.toml` 的 `version`，提交后执行：
 
