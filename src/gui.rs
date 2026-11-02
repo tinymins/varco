@@ -8,6 +8,7 @@ use tokio::runtime::Handle;
 use varco::core::backend::{self, Connection};
 use varco::core::engine::{Phase, Status};
 use varco::core::error::FailReason;
+use varco::core::ssh::{self, store, SshService, SshState};
 use varco::credential::Credential;
 
 slint::include_modules!();
@@ -16,6 +17,7 @@ const REFRESH: Duration = Duration::from_millis(500);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 
 const GREEN: slint::Color = slint::Color::from_rgb_u8(0x1a, 0x7f, 0x37);
+const RED: slint::Color = slint::Color::from_rgb_u8(0xb4, 0x23, 0x18);
 const AMBER: slint::Color = slint::Color::from_rgb_u8(0xb5, 0x47, 0x08);
 
 fn format_bytes(bytes: u64) -> String {
@@ -41,6 +43,64 @@ fn traffic_line(total: u64, previous: u64, elapsed: Duration) -> SharedString {
         format_bytes(per_second as u64)
     )
     .into()
+}
+
+/// Reflects the key field. A key that fails here cannot be switched on.
+fn show_key_validity(app: &App, text: &str) {
+    match store::parse_public_key(text) {
+        Ok(_) => {
+            app.set_ssh_key_valid(true);
+            app.set_ssh_key_error(SharedString::new());
+        }
+        Err(error) => {
+            app.set_ssh_key_valid(false);
+            // An empty field is the normal starting point, not a mistake.
+            let show = error != store::KeyError::Empty;
+            app.set_ssh_key_error(if show {
+                error.to_string().into()
+            } else {
+                SharedString::new()
+            });
+        }
+    }
+}
+
+fn login_name() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "user".to_owned())
+}
+
+fn show_ssh(app: &App, service: &SshService) {
+    let state = service.state.borrow().clone();
+    match state {
+        SshState::Off | SshState::Starting => {
+            app.set_ssh_status("启动中…".into());
+            app.set_ssh_status_color(AMBER);
+            app.set_ssh_command(SharedString::new());
+        }
+        SshState::Listening { ip, connections } => {
+            app.set_ssh_status(format!("● 已开启 · {connections} 个连接").into());
+            app.set_ssh_status_color(GREEN);
+            let command = format!("ssh -p {} {}@{ip}", ssh::PORT, login_name());
+            app.set_ssh_command(command.into());
+        }
+        SshState::Error(message) => {
+            app.set_ssh_status(message.into());
+            app.set_ssh_status_color(RED);
+            app.set_ssh_command(SharedString::new());
+        }
+    }
+}
+
+fn turn_ssh_off(app: &App, runtime: &Handle, slot: &mut Option<SshService>) {
+    if let Some(service) = slot.take() {
+        runtime.spawn(service.stop());
+    }
+    app.set_ssh_on(false);
+    app.set_ssh_status(SharedString::new());
+    app.set_ssh_command(SharedString::new());
+    app.set_ssh_fingerprint(SharedString::new());
 }
 
 struct Session {
@@ -174,17 +234,90 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
         }
     });
 
+    // The key is remembered; whether the server was on deliberately is not.
+    if let Some(key) = store::Store::open_default()
+        .ok()
+        .and_then(|s| s.load_authorized_key())
+    {
+        show_key_validity(&app, &key);
+        app.set_ssh_pubkey(key.into());
+    }
+    app.set_ssh_admin(ssh::shell_is_admin());
+    let ssh_service: Rc<RefCell<Option<SshService>>> = Rc::default();
+
+    let weak = app.as_weak();
+    app.on_ssh_pubkey_edited(move |text| {
+        if let Some(app) = weak.upgrade() {
+            show_key_validity(&app, &text);
+        }
+    });
+
+    let weak = app.as_weak();
+    let toggle_session = session.clone();
+    let toggle_service = ssh_service.clone();
+    let toggle_runtime = runtime.clone();
+    app.on_ssh_toggled(move |on| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        let mut service = toggle_service.borrow_mut();
+        if !on {
+            turn_ssh_off(&app, &toggle_runtime, &mut service);
+            return;
+        }
+        let session = toggle_session.borrow();
+        let Some(active) = session.as_ref() else {
+            app.set_ssh_on(false);
+            return;
+        };
+        let key = app.get_ssh_pubkey();
+        let saved = store::Store::open_default().and_then(|s| s.save_authorized_key(&key));
+        let prepared = saved.and_then(|()| ssh::prepare(&key));
+        match prepared {
+            Ok((allowed, host_key)) => {
+                let started = SshService::start(
+                    &toggle_runtime,
+                    allowed,
+                    host_key,
+                    active.connection.status.clone(),
+                );
+                app.set_ssh_fingerprint(started.host_fingerprint.as_str().into());
+                show_ssh(&app, &started);
+                *service = Some(started);
+            }
+            Err(error) => {
+                app.set_ssh_on(false);
+                app.set_ssh_key_error(error.to_string().into());
+            }
+        }
+    });
+
     let weak = app.as_weak();
     let tick_session = session.clone();
+    let tick_service = ssh_service.clone();
+    let tick_runtime = runtime.clone();
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, REFRESH, move || {
         if let Some(app) = weak.upgrade() {
             tick(&app, &mut tick_session.borrow_mut());
+            let mut service = tick_service.borrow_mut();
+            // Leaving the network takes the server with it.
+            if tick_session.borrow().is_none() {
+                turn_ssh_off(&app, &tick_runtime, &mut service);
+            } else if let Some(service) = service.as_ref() {
+                show_ssh(&app, service);
+            }
         }
     });
 
     app.run()?;
 
+    // Sessions end first, while the network they run over still exists.
+    if let Some(service) = ssh_service.borrow_mut().take() {
+        runtime.block_on(async {
+            let _ = tokio::time::timeout(SHUTDOWN_WAIT, service.stop()).await;
+        });
+    }
     // Closing the window disconnects. Waiting lets the NIC go away cleanly.
     if let Some(mut active) = session.borrow_mut().take() {
         let _ = active.connection.stop.send(true);

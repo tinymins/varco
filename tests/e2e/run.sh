@@ -163,6 +163,55 @@ else
   echo "  SKIP  netem not available in this kernel"
 fi
 
+echo "== built-in SSH server"
+SSH_PORT=2222
+check_closed() { ex "$1" "! nc -z -w3 $2 $SSH_PORT"; }
+check  "off by default: nothing listens on $SSH_PORT" check_closed a1 "$IP_A2"
+ex a1 "ssh-keygen -q -t ed25519 -N '' -f /tmp/id; ssh-keygen -q -t ed25519 -N '' -f /tmp/other"
+PUBKEY=$(ex a1 "cat /tmp/id.pub")
+# a3 rejoins as an SSH server; a1 is the client.
+ex a3 "pkill -x varco; true"
+sleep 2
+docker exec -d -e "VARCO_CREDENTIAL=$CODE_A" -e "VARCO_SSH_PUBKEY=$PUBKEY" varco-a3 bash -c "$BIN >>/tmp/client-ssh.log 2>&1"
+IP_S=""
+for _ in $(seq 60); do IP_S=$(mesh_ip a3); [ -n "$IP_S" ] && ex a3 "grep -q 'SSH 已开启' /tmp/client-ssh.log" 2>/dev/null && break; sleep 0.5; done
+echo "  ssh server a3=$IP_S"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 -p $SSH_PORT"
+sshq() { ex a1 "ssh -i /tmp/id $SSH_OPTS root@$IP_S $(printf '%q' "$1")"; }
+if [ "$(sshq 'echo ok-$((6*7))')" = "ok-42" ]; then ok "ssh with the right key runs a command"; else bad "ssh command failed"; ex a3 "tail -5 /tmp/client-ssh.log"; fi
+[ "$(sshq 'exit 7' >/dev/null 2>&1; echo $?)" = 7 ] && ok "exit code comes back" || bad "exit code lost"
+refuse "ssh with another key is refused" ex a1 "ssh -i /tmp/other -o IdentitiesOnly=yes $SSH_OPTS root@$IP_S true"
+refuse "password login is not offered" ex a1 "ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no $SSH_OPTS root@$IP_S true"
+check  "the code is not visible to remote commands" bash -c "! docker exec varco-a1 ssh -i /tmp/id $SSH_OPTS root@$IP_S env | grep -q VARCO_"
+ex a1 "head -c 3000000 /dev/urandom > /tmp/scp-up; sha256sum < /tmp/scp-up > /tmp/scp-up.sum"
+ex a1 "scp -i /tmp/id ${SSH_OPTS/-p $SSH_PORT/-P $SSH_PORT} /tmp/scp-up root@$IP_S:/tmp/scp-landed && scp -i /tmp/id ${SSH_OPTS/-p $SSH_PORT/-P $SSH_PORT} root@$IP_S:/tmp/scp-landed /tmp/scp-back" 2>&1 | tail -1
+[ "$(ex a3 'sha256sum < /tmp/scp-landed' 2>/dev/null)" = "$(ex a1 'cat /tmp/scp-up.sum')" ] && [ "$(ex a1 'sha256sum < /tmp/scp-back' 2>/dev/null)" = "$(ex a1 'cat /tmp/scp-up.sum')" ] && ok "scp both ways, 3 MB intact" || bad "scp round trip differs"
+docker exec -d varco-a3 bash -c "echo via-loopback | nc -l -p 9100 -s 127.0.0.1 -q1"
+docker exec -d varco-a1 bash -c "ssh -i /tmp/id $SSH_OPTS -N -L 9101:127.0.0.1:9100 root@$IP_S"
+sleep 2
+[ "$(ex a1 'nc -w3 127.0.0.1 9101 </dev/null')" = "via-loopback" ] && ok "ssh -L reaches the machine's own loopback" || bad "ssh -L to loopback failed"
+docker exec -d varco-a2 bash -c "echo leaked | nc -l -p 9102 -q1"
+docker exec -d varco-a1 bash -c "ssh -i /tmp/id $SSH_OPTS -N -L 9103:$IP_A2:9102 root@$IP_S"
+sleep 2
+[ -z "$(ex a1 'nc -w3 127.0.0.1 9103 </dev/null' 2>/dev/null)" ] && ok "ssh -L to another address is refused" || bad "ssh -L reached another machine"
+refuse "ssh -R is refused" ex a1 "ssh -i /tmp/id $SSH_OPTS -o ExitOnForwardFailure=yes -R 9200:127.0.0.1:22 root@$IP_S true"
+check  "another network cannot reach the port" check_closed b1 "$IP_S"
+A3_ETH=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' varco-a3)
+check  "the machine's real address has no SSH" check_closed a1 "$A3_ETH"
+docker exec -d varco-a1 bash -c "ssh -i /tmp/id $SSH_OPTS root@$IP_S 'sleep 75; echo survived' > /tmp/ssh-outage 2>&1"
+sleep 5
+ex a1 "iptables -A OUTPUT -p tcp --dport $PORT -j DROP"
+sleep 60
+ex a1 "iptables -D OUTPUT -p tcp --dport $PORT -j DROP"
+for _ in $(seq 60); do ex a1 "grep -q survived /tmp/ssh-outage" 2>/dev/null && break; sleep 2; done
+check  "an open SSH session survives a 60 s outage" ex a1 "grep -q survived /tmp/ssh-outage"
+docker exec -d varco-a1 bash -c "ssh -i /tmp/id $SSH_OPTS root@$IP_S 'sleep 987'"
+sleep 2
+check  "a remote process is running" ex a3 "pgrep -f '[s]leep 987'"
+ex a3 "pkill -INT -x varco"
+sleep 3
+refuse "leaving ends remote processes" ex a3 "pgrep -f '[s]leep 987'"
+
 echo "== secrets stay out of logs"
 SECRET_VALUE=$(secret "$OUT_A")
 refuse "secret absent from server log" ex srv "grep -qF '$SECRET_VALUE' /tmp/server.log"

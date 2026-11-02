@@ -52,6 +52,22 @@
 | 没有管理员权限 | 重新打开程序并同意提权 |
 | 创建虚拟网卡失败 | 检查安全软件是否拦截；把完整提示发给管理员 |
 
+### 内置 SSH 服务器（v0.2.0 起）
+
+方便远程调试，对方电脑不用安装或开启任何 SSH 服务。连接后在窗口里粘贴**你的公钥**（`.pub` 文件的内容），打开“SSH 服务器”开关，把窗口显示的命令拿到另一台成员上执行：
+
+```sh
+ssh -p 2222 emil@10.77.1.3
+```
+
+- **能做什么**：交互 shell、执行命令、`scp` / `sftp`、`ssh -L`（只能转发到对方本机 `127.0.0.1`，适合远程调试器和 VS Code Remote）。
+- **谁能连**：只监听组网 IP，只有同一 network 的成员能连到端口，并且只认这一个公钥，没有密码登录。
+- **默认关闭**：每次启动都是关的，公钥会记住。关开关、断开组网或关闭窗口，所有 SSH 会话和它们启动的进程都会立刻结束。
+- **权限**：Windows 上远程 shell 是**管理员**（程序本身已提权）；macOS 和 Linux 窗口版是当前用户；Linux 命令行版（`sudo`）是 root。
+- **防火墙**：Windows 会自动添加一条只针对组网网段的规则，退出时删除。macOS 开了应用防火墙时可能需要手动允许；Linux 的 `ufw` 等请自行放行组网网段的 2222 端口。
+- **无界面机器**：设置环境变量 `VARCO_SSH_PUBKEY=<公钥>` 即自动开启。
+- **注意**：开启后，持有对应私钥的人能完全控制这台电脑，不用时请关闭。
+
 ## 服务端
 
 ### 配置
@@ -97,6 +113,7 @@ journalctl -u varco -f
 ## 需要知道的
 
 - **成员之间完全互通**：同一 network 的成员能访问彼此在组网接口上监听的所有端口，也能看到彼此的主机名和 IP。
+- **开启 SSH 等于交出这台电脑**：组网隔离的是网络，不限制你在对方机器上的操作。默认关闭，只给信任的公钥。
 - **服务端能看到明文**：TLS 在服务端终止，组网内的流量在服务端进程里是明文的。需要保密的内容请在应用层加密，比如 SSH。
 - **只支持 IPv4**，全部流量经服务端中转。
 
@@ -133,4 +150,5 @@ git tag v0.2.0 && git push origin v0.2.0
 - [Slint](https://slint.dev)：Royalty-free License 2.0，程序内“关于”页显示其声明
 - Noto Sans SC 子集：SIL OFL 1.1，见 `assets/fonts/OFL-LICENSE.txt`
 - 官网字体 Instrument Serif、JetBrains Mono：SIL OFL 1.1，见 `site/fonts/`
+- [russh](https://github.com/Eugeny/russh)、russh-sftp：Apache-2.0；[portable-pty](https://github.com/wezterm/wezterm)：MIT
 - [Wintun](https://www.wintun.net)：内嵌未修改的官方签名 DLL，许可证见 `vendor/wintun/LICENSE.txt`

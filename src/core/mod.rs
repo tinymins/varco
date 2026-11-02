@@ -4,4 +4,5 @@ pub mod engine;
 pub mod error;
 #[cfg(unix)]
 pub mod helper;
+pub mod ssh;
 pub mod tun;

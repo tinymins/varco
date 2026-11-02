@@ -1,4 +1,4 @@
-import { Button, LineEdit, AboutSlint, ScrollView } from "std-widgets.slint";
+import { Button, LineEdit, AboutSlint, ScrollView, Switch } from "std-widgets.slint";
 import "../assets/fonts/NotoSansSC-Subset.otf";
 
 export struct MemberRow { hostname: string, ip: string, is-self: bool }
@@ -17,7 +17,7 @@ export component App inherits Window {
     title: "varco";
     preferred-width: 400px;
     min-width: 340px;
-    preferred-height: 440px;
+    preferred-height: 560px;
     min-height: 300px;
     default-font-family: "Noto Sans SC";
     default-font-size: 14px;
@@ -38,8 +38,21 @@ export component App inherits Window {
     in property <[MemberRow]> members;
     in-out property <string> code;
 
+    // SSH server. Off on every start: only the key is remembered.
+    in-out property <bool> ssh-on;
+    in-out property <string> ssh-pubkey;
+    in property <bool> ssh-key-valid;
+    in property <string> ssh-key-error;
+    in property <string> ssh-status;
+    in property <color> ssh-status-color: #1a7f37;
+    in property <string> ssh-command;
+    in property <string> ssh-fingerprint;
+    in property <bool> ssh-admin;
+
     callback confirm(string);
     callback disconnect();
+    callback ssh-toggled(bool);
+    callback ssh-pubkey-edited(string);
 
     property <bool> show-about;
     property <bool> copied;
@@ -55,6 +68,12 @@ export component App inherits Window {
         visible: false;
         width: 0; height: 0;
         text: root.ip;
+    }
+
+    ssh-clipboard := TextInput {
+        visible: false;
+        width: 0; height: 0;
+        text: root.ssh-command;
     }
 
     if !root.joined && !root.show-about: VerticalLayout {
@@ -88,35 +107,96 @@ export component App inherits Window {
         padding-top: 30px;
         spacing: 8px;
         Text { text: "● " + root.status-text; color: root.status-color; font-size: 16px; font-weight: 600; wrap: word-wrap; }
-        Row { label: "网络"; value: root.network; }
-        HorizontalLayout {
-            spacing: 12px;
-            Text { text: "本机IP"; width: 44px; color: #666; vertical-alignment: center; }
-            Text { text: root.ip; font-weight: 600; vertical-alignment: center; }
-            Button {
-                text: root.copied ? "已复制" : "复制";
-                clicked => {
-                    clipboard.select-all();
-                    clipboard.copy();
-                    root.copied = true;
-                }
-            }
-            Rectangle { horizontal-stretch: 1; }
-        }
-        Row { label: "网段"; value: root.cidr; }
-        Row { label: "延迟"; value: root.latency; }
-        Row { label: "上行"; value: root.upload; }
-        Row { label: "下行"; value: root.download; }
-        Text { text: "在线成员"; color: #666; }
         ScrollView {
             vertical-stretch: 1;
-            min-height: 60px;
+            min-height: 120px;
             VerticalLayout {
                 alignment: start;
-                spacing: 4px;
+                spacing: 8px;
+                padding-right: 12px;
+                Row { label: "网络"; value: root.network; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { text: "本机IP"; width: 44px; color: #666; vertical-alignment: center; }
+                    Text { text: root.ip; font-weight: 600; vertical-alignment: center; }
+                    Button {
+                        text: root.copied ? "已复制" : "复制";
+                        clicked => {
+                            clipboard.select-all();
+                            clipboard.copy();
+                            root.copied = true;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Row { label: "网段"; value: root.cidr; }
+                Row { label: "延迟"; value: root.latency; }
+                Row { label: "上行"; value: root.upload; }
+                Row { label: "下行"; value: root.download; }
+                Text { text: "在线成员"; color: #666; }
                 for member in root.members: Row {
                     label: member.is-self ? "本机" : "";
                     value: member.ip + "   " + member.hostname;
+                }
+
+                Rectangle { height: 1px; background: #e2e2e2; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "SSH 服务器"; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                    Switch {
+                        checked <=> root.ssh-on;
+                        // Turning off is always possible.
+                        enabled: root.ssh-on || root.ssh-key-valid;
+                        toggled => { root.ssh-toggled(self.checked); }
+                    }
+                }
+                if !root.ssh-on: LineEdit {
+                    placeholder-text: "粘贴公钥，例如 ssh-ed25519 AAAA…";
+                    text <=> root.ssh-pubkey;
+                    edited(value) => { root.ssh-pubkey-edited(value); }
+                }
+                if !root.ssh-on && root.ssh-key-error != "": Text {
+                    text: root.ssh-key-error;
+                    color: #b42318;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                if !root.ssh-on: Text {
+                    text: root.ssh-admin
+                        ? "开启后，持有对应私钥的人能以管理员权限完全控制这台电脑。"
+                        : "开启后，持有对应私钥的人能以当前用户身份操作这台电脑。";
+                    color: #666;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                if root.ssh-on: Text {
+                    text: root.ssh-status;
+                    color: root.ssh-status-color;
+                    wrap: word-wrap;
+                }
+                if root.ssh-on && root.ssh-command != "": HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: root.ssh-command; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    Button {
+                        text: "复制";
+                        clicked => {
+                            ssh-clipboard.select-all();
+                            ssh-clipboard.copy();
+                        }
+                    }
+                }
+                if root.ssh-on && root.ssh-fingerprint != "": Text {
+                    text: "主机指纹 " + root.ssh-fingerprint;
+                    color: #666;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                if root.ssh-on && root.ssh-admin: Text {
+                    text: "远程 shell 具有管理员权限。不用时请关闭。";
+                    color: #b54708;
+                    font-size: 12px;
+                    wrap: word-wrap;
                 }
             }
         }
