@@ -1,5 +1,7 @@
 # varco
 
+[官网](https://lab.vmins.com/varco/) · [下载](../../releases/latest)
+
 凭证接入的 TCP 组网工具。打开程序，粘贴 Code，确认后加入组网。组网内的机器可以互通，除此之外什么也访问不了。
 
 ```
@@ -103,7 +105,7 @@ journalctl -u varco -f
 ```sh
 cargo test                # 单元测试和真实 TLS 上的集成测试，不需要 root
 tests/e2e/run.sh          # Docker 内真实 TUN 的端到端测试，约 6 分钟
-cargo run --features gui  # 带窗口运行
+cargo run --features gui  # 带窗口运行（Linux 需要 fontconfig，或设置 RUST_FONTCONFIG_DLOPEN=1）
 scripts/package.sh        # 在 macOS 上本地构建发布产物到 dist/
 ```
 
@@ -121,8 +123,13 @@ scripts/package.sh        # 在 macOS 上本地构建发布产物到 dist/
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
+## 许可证
+
+本项目代码采用 [MIT](LICENSE) 许可证。下列第三方组件各自遵循自己的许可证。
+
 ## 第三方组件
 
 - [Slint](https://slint.dev)：Royalty-free License 2.0，程序内“关于”页显示其声明
 - Noto Sans SC 子集：SIL OFL 1.1，见 `assets/fonts/OFL-LICENSE.txt`
+- 官网字体 Instrument Serif、JetBrains Mono：SIL OFL 1.1，见 `site/fonts/`
 - [Wintun](https://www.wintun.net)：内嵌未修改的官方签名 DLL，许可证见 `vendor/wintun/LICENSE.txt`

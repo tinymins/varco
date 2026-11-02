@@ -13,6 +13,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Load fontconfig at run time, so builds need no system fontconfig package.
+  RUST_FONTCONFIG_DLOPEN: "1"
+
 jobs:
   check:
     name: fmt + clippy

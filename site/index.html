@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>varco — 一段 Code，接入一张私有网络</title>
+<meta name="description" content="跨平台 TCP 组网工具。打开程序，粘贴 Code，点确认。组网内的机器彼此互通，除此之外什么也访问不了。">
+<link rel="canonical" href="https://lab.vmins.com/varco/">
+<meta name="theme-color" content="#f3f0e8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#11100d" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="varco">
+<meta property="og:title" content="varco — 一段 Code，接入一张私有网络">
+<meta property="og:description" content="跨平台 TCP 组网工具。组网内的机器彼此互通，除此之外什么也访问不了。">
+<meta property="og:url" content="https://lab.vmins.com/varco/">
+<meta property="og:image" content="https://lab.vmins.com/varco/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/InstrumentSerif-Italic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+
+<header class="bar">
+  <a class="mark" href="#top" aria-label="varco 首页">varco</a>
+  <nav aria-label="页面导航">
+    <a href="#how">工作方式</a>
+    <a href="#isolation">隔离</a>
+    <a href="#stability">稳定性</a>
+    <a href="#server">服务端</a>
+    <a class="nav-cta" href="#download">下载</a>
+  </nav>
+</header>
+
+<main id="main">
+<section class="hero" id="top">
+  <div class="hero-word" aria-hidden="true">
+    <span class="word">varco</span>
+    <p class="gloss"><i>varco</i> <span class="mono">/ˈvar.ko/</span><br>意大利语：通道，缺口</p>
+  </div>
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <h1>一段 Code，<br>接入一张私有网络。</h1>
+      <p class="lede">打开程序，粘贴 Code，点确认。组网内的机器彼此互通，除此之外什么也访问不了。</p>
+      <div class="actions">
+        <a class="btn primary" id="primary-download" href="#download">下载客户端</a>
+        <a class="btn" href="https://github.com/tinymins/varco">查看源码 ↗</a>
+      </div>
+      <p class="facts mono">Windows · macOS · Linux<br>单文件 · 只走一个 TCP 端口</p>
+    </div>
+
+    <figure class="window" id="demo" aria-label="varco 客户端加入组网的演示">
+      <div class="titlebar" aria-hidden="true"><i></i><i></i><i></i><span>varco</span></div>
+      <div class="pane" data-pane="entry" aria-hidden="true">
+        <strong class="pane-title">加入组网</strong>
+        <span class="pane-sub">请粘贴收到的 Code</span>
+        <div class="field mono"><span id="demo-code"></span><b class="caret"></b></div>
+        <div class="fake-btn" id="demo-confirm">确认</div>
+      </div>
+      <div class="pane" data-pane="joined" hidden aria-hidden="true">
+        <strong class="status"><b class="dot"></b>已连接</strong>
+        <dl>
+          <dt>网络</dt><dd>customer-a</dd>
+          <dt>本机 IP</dt><dd class="strong mono">10.77.1.3</dd>
+          <dt>网段</dt><dd class="mono">10.77.1.0/24</dd>
+          <dt>延迟</dt><dd class="mono" id="demo-rtt">38 ms</dd>
+          <dt>上行</dt><dd class="mono" id="demo-up">0 KB</dd>
+          <dt>下行</dt><dd class="mono" id="demo-down">0 KB</dd>
+        </dl>
+        <div class="members">
+          <span>在线成员</span>
+          <p class="mono">10.77.1.1 <em>admin-mac</em></p>
+          <p class="mono">10.77.1.2 <em>build-server</em></p>
+          <p class="mono">10.77.1.3 <em>本机</em></p>
+        </div>
+      </div>
+      <figcaption>界面演示，数据为示例</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="how" id="how">
+  <header class="sec-head">
+    <span class="idx mono">01</span>
+    <h2>对方不需要懂网络。</h2>
+    <p>不用改配置，不用记地址。服务器地址、证书指纹和密钥都在 Code 里，复制粘贴就够了。</p>
+  </header>
+  <ol class="steps">
+    <li>
+      <span class="num">1</span>
+      <h3>发一段 Code</h3>
+      <p>在服务器上生成，通过你信任的渠道发给对方。</p>
+      <code class="mono">varco server gen-credential</code>
+    </li>
+    <li>
+      <span class="num">2</span>
+      <h3>打开，粘贴，确认</h3>
+      <p>程序在本机建一张虚拟网卡，只接管组网网段的流量。默认路由和 DNS 都不动。</p>
+      <code class="mono">10.77.1.0/24 dev tun0</code>
+    </li>
+    <li>
+      <span class="num">3</span>
+      <h3>直接用 IP 访问</h3>
+      <p>窗口里能看到每台成员的地址。SSH、远程桌面、内部服务，用平时的工具连过去。</p>
+      <code class="mono">ssh admin@10.77.1.3</code>
+    </li>
+  </ol>
+</section>
+
+<section class="iso" id="isolation">
+  <header class="sec-head">
+    <span class="idx mono">02</span>
+    <h2>隔离不靠防火墙规则。</h2>
+    <p>服务端不是路由器。它没有虚拟网卡，也不向外转发，客户端手里根本没有通往服务器本机、云内网或公网的路径。规则写错会漏，不存在的路径漏不了。</p>
+  </header>
+  <div class="iso-grid">
+    <svg id="relay-svg" viewBox="0 0 640 500" role="img" aria-labelledby="relay-title relay-desc">
+      <title id="relay-title">转发示意图</title>
+      <desc id="relay-desc">网络 A 的成员之间的数据包经服务端到达对方。发往网络 B、服务器本机或公网的数据包在服务端被丢弃。</desc>
+      <g class="links">
+        <path id="p-a1" d="M92 96 L320 250"/>
+        <path id="p-a2" d="M92 250 L320 250"/>
+        <path id="p-a3" d="M92 404 L320 250"/>
+        <path id="p-b1" d="M548 150 L320 250"/>
+        <path id="p-b2" d="M548 350 L320 250"/>
+      </g>
+      <g class="zones">
+        <rect x="12" y="30" width="160" height="440" rx="16"/>
+        <rect x="468" y="84" width="160" height="332" rx="16"/>
+        <text x="92" y="20" text-anchor="middle">网络 A</text>
+        <text x="548" y="74" text-anchor="middle">网络 B</text>
+      </g>
+      <g class="node a"><circle cx="92" cy="96" r="30"/><text x="92" y="104" text-anchor="middle">.1</text></g>
+      <g class="node a"><circle cx="92" cy="250" r="30"/><text x="92" y="258" text-anchor="middle">.2</text></g>
+      <g class="node a"><circle cx="92" cy="404" r="30"/><text x="92" y="412" text-anchor="middle">.3</text></g>
+      <g class="node b"><circle cx="548" cy="150" r="30"/><text x="548" y="158" text-anchor="middle">.1</text></g>
+      <g class="node b"><circle cx="548" cy="350" r="30"/><text x="548" y="358" text-anchor="middle">.2</text></g>
+      <g class="hub"><rect x="252" y="196" width="136" height="108" rx="14"/><text x="320" y="244" text-anchor="middle">varco</text><text class="small" x="320" y="274" text-anchor="middle">没有网卡</text></g>
+
+      <circle class="pkt ok" r="9"><animateMotion dur="5s" repeatCount="indefinite" keyPoints="0;0.5;1;1" keyTimes="0;0.3;0.6;1" calcMode="linear" path="M92 96 L320 250 L92 404"/></circle>
+      <circle class="pkt ok" r="9"><animateMotion dur="5s" begin="2.5s" repeatCount="indefinite" keyPoints="0;0.5;1;1" keyTimes="0;0.3;0.6;1" calcMode="linear" path="M92 250 L320 250 L92 96"/></circle>
+      <circle class="pkt no" r="9"><animateMotion dur="4s" begin="1s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.45;1" calcMode="linear" path="M92 404 L244 300"/><animate attributeName="opacity" dur="4s" begin="1s" repeatCount="indefinite" values="1;1;0;0" keyTimes="0;0.45;0.5;1"/></circle>
+      <circle class="pkt no" r="9"><animateMotion dur="4s" begin="3s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.45;1" calcMode="linear" path="M548 350 L396 284"/><animate attributeName="opacity" dur="4s" begin="3s" repeatCount="indefinite" values="1;1;0;0" keyTimes="0;0.45;0.5;1"/></circle>
+      <g class="stop"><path d="M236 288 l18 18 m0 -18 l-18 18"/><path d="M386 274 l18 18 m0 -18 l-18 18"/></g>
+    </svg>
+    <div class="rules">
+      <h3>每个数据包都要过这三关</h3>
+      <ol class="mono">
+        <li><span>必须是 IPv4</span><b>否则丢弃</b></li>
+        <li><span>源 IP 必须是发送者自己的地址</span><b>否则丢弃</b></li>
+        <li><span>目标必须是同一网络的在线成员</span><b>否则丢弃</b></li>
+      </ol>
+      <p>广播、组播、其他网络、服务器本机和公网地址都不是在线成员，自然到不了。伪造源地址的包同样过不去。</p>
+      <p class="note"><strong>互通是双向的。</strong>同一网络的成员能访问彼此在组网接口上监听的所有端口，所以每个客户应该单独一个网络。</p>
+    </div>
+  </div>
+</section>
+
+<section class="sta" id="stability">
+  <header class="sec-head">
+    <span class="idx mono">03</span>
+    <h2>为不稳定的网络而写。</h2>
+    <p>走 TCP 解决的是 UDP 被封的问题，但 TCP 本身不保证连接不断。断线检测、重连和拥塞处理都是程序自己做的。</p>
+  </header>
+  <div class="metrics">
+    <div><strong class="mono">10<small>s</small></strong><span>一次心跳</span><p>30 秒没有响应就判定断线，休眠、换网和半开连接都能发现。</p></div>
+    <div><strong class="mono">1→30<small>s</small></strong><span>退避重连</span><p>无限重试并加入抖动，服务端重启后客户端不会同时涌入。</p></div>
+    <div><strong class="mono">256</strong><span>有界队列</span><p>满了就丢包，不让延迟越积越高。拥塞信号交给内层 TCP，一个卡住的成员也拖不慢别人。</p></div>
+    <div><strong class="mono">1<small>小时</small></strong><span>地址保留</span><p>断线后 IP 不变。服务端重启也不丢，客户端会报回原来的地址。</p></div>
+  </div>
+  <div class="proof">
+    <h3>每次提交都在真实虚拟网卡上跑一遍</h3>
+    <ul>
+      <li>断网 60 秒，12 MB 的内层传输恢复后完整到达，校验和一致</li>
+      <li>重启服务端，所有成员自动回连，IP 不变</li>
+      <li>冻结一个成员并持续向它灌流量，其他成员不受影响</li>
+      <li>外层链路 5% 丢包，文件传输依然完整</li>
+      <li>证书被替换时连接中止，密钥不会发出</li>
+    </ul>
+  </div>
+</section>
+
+<section class="srv" id="server">
+  <header class="sec-head">
+    <span class="idx mono">04</span>
+    <h2>服务端只有一个进程，一个文件。</h2>
+    <p>没有数据库，没有管理后台，没有内核模块，也不需要 root。配置里只有地址、网段和凭证。</p>
+  </header>
+  <div class="srv-grid">
+<pre class="code mono" tabindex="0" aria-label="服务端配置示例"><span class="c"># config.toml</span>
+<span class="k">listen</span>      = <span class="s">"0.0.0.0:8443"</span>
+<span class="k">public_addr</span> = <span class="s">"vpn.example.com:8443"</span>
+
+<span class="c"># 每个客户一个 network，彼此不通</span>
+[[<span class="k">network</span>]]
+<span class="k">name</span>        = <span class="s">"customer-a"</span>
+<span class="k">cidr</span>        = <span class="s">"10.77.1.0/24"</span>
+<span class="k">credentials</span> = [<span class="s">"…"</span>]</pre>
+<pre class="code mono" tabindex="0" aria-label="服务端操作示例"><span class="c"># 生成一段发给对方的 Code</span>
+varco server gen-credential \
+  --network customer-a
+
+<span class="c"># 启动</span>
+systemctl enable --now varco
+
+<span class="c"># 谁上线了，分到什么 IP</span>
+journalctl -u varco -f</pre>
+  </div>
+</section>
+
+<section class="honest" id="limits">
+  <header class="sec-head">
+    <span class="idx mono">05</span>
+    <h2>它不做什么。</h2>
+    <p>够简单才够稳定。下面这些是有意的取舍，用之前应该知道。</p>
+  </header>
+  <dl class="limits">
+    <dt>服务端能看到明文</dt>
+    <dd>TLS 在服务端终止，没有端到端加密。服务器要是你自己的；需要保密的内容请在应用层加密，比如 SSH。</dd>
+    <dt>全部流量经服务端中转</dt>
+    <dd>不做 P2P 打洞，速度取决于服务器带宽和线路。设计目标是连得上、断不了，不是跑得快。</dd>
+    <dt>网络替换证书时连不上</dt>
+    <dd>证书指纹被固定在 Code 里。如果网络在解密 TLS，连接会中止并提示原因，不会绕过。</dd>
+    <dt>程序没有正式代码签名</dt>
+    <dd>首次运行可能被 SmartScreen 或 Gatekeeper 拦截。需要提权，因为创建虚拟网卡要管理员权限。</dd>
+    <dt>只支持 IPv4</dt>
+    <dd>没有审批流、凭证有效期、托盘常驻和开机自启。撤销凭证就是从配置里删掉再重启服务。</dd>
+  </dl>
+</section>
+
+<section class="dl" id="download">
+  <header class="sec-head">
+    <span class="idx mono">06</span>
+    <h2>下载</h2>
+    <p>一个文件，不用安装。Windows 自带 Wintun 驱动，点开就能用。</p>
+  </header>
+  <div class="dl-table" id="dl-table">
+    <div class="dl-row" data-os="windows"><strong>Windows</strong><span class="dl-links"><a href="https://github.com/tinymins/varco/releases/latest/download/varco-windows-x64.exe">x64</a><a href="https://github.com/tinymins/varco/releases/latest/download/varco-windows-arm64.exe">ARM64</a></span><em>双击运行，同意 UAC</em></div>
+    <div class="dl-row" data-os="macos"><strong>macOS</strong><span class="dl-links"><a href="https://github.com/tinymins/varco/releases/latest/download/varco-macos-arm64.zip">Apple 芯片</a><a href="https://github.com/tinymins/varco/releases/latest/download/varco-macos-x64.zip">Intel</a></span><em>解压后打开，输入系统密码</em></div>
+    <div class="dl-row" data-os="linux"><strong>Linux 桌面</strong><span class="dl-links"><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-gui-x64">x64</a><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-gui-arm64">ARM64</a></span><em>通过 pkexec 授权</em></div>
+    <div class="dl-row" data-os="server"><strong>Linux 服务器</strong><span class="dl-links"><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-x64">x64</a><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-arm64">ARM64</a></span><em>服务端和无界面客户端，静态链接</em></div>
+  </div>
+  <p class="dl-more"><a href="https://github.com/tinymins/varco/releases">全部版本和校验和 ↗</a><a href="https://github.com/tinymins/varco#readme">使用说明 ↗</a></p>
+</section>
+</main>
+
+<footer class="foot">
+  <span class="word-small">varco</span>
+  <p>用 Rust 编写。界面基于 <a href="https://slint.dev">Slint</a>，Windows 虚拟网卡基于 <a href="https://www.wintun.net">Wintun</a>，字体 Noto Sans SC、Instrument Serif、JetBrains Mono 均采用 SIL OFL。</p>
+  <p><a href="/">TinyMins Lab</a> · <a href="https://github.com/tinymins/varco">GitHub</a></p>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>
