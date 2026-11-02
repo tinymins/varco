@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::io::{IsTerminal, Write};
 use varco::core::backend;
 use varco::core::engine::{Phase, Status};
-use varco::core::ssh::{self, SshService, SshState};
+use varco::core::ssh::{self, store, SshService, SshState};
 use varco::launch::Launch;
 
 pub const CREDENTIAL_ENV: &str = "VARCO_CREDENTIAL";
@@ -63,25 +63,33 @@ pub async fn run(launch: Launch) -> Result<std::process::ExitCode> {
     if let Some(problem) = &launch.problem {
         return Ok(fail(problem));
     }
-    let ssh_only = launch.ssh_only;
+    let credential = match launch.credential(&read_code(launch.code.as_deref())?) {
+        Ok(credential) => credential,
+        Err(message) => return Ok(fail(&message)),
+    };
+    let ssh_only = launch.ssh_only_for(&credential);
     // Checked before joining: a key that was asked for and cannot work should
     // not leave a connection up that nobody can reach.
-    let ssh_keys = match &launch.ssh_pubkey {
-        Some(key) => match ssh::prepare(key) {
+    let ssh_keys = match launch.granted_key(&credential) {
+        Some(key) => match ssh::prepare(&key) {
             Ok(keys) => Some(keys),
             Err(error) => return Ok(fail(&format!("SSH 无法开启（{error}）"))),
         },
         None => None,
     };
+    if let (Some(key), Some((allowed, _))) = (&credential.ssh_pubkey, &ssh_keys) {
+        if key.key_data() == allowed.key_data() {
+            println!(
+                "这个 Code 会允许持有私钥的人远程控制这台电脑（公钥 {}）",
+                store::fingerprint(allowed)
+            );
+        }
+    }
     if ssh_only && ssh_keys.is_none() {
         return Ok(fail(&format!(
             "仅 SSH 模式需要公钥（--ssh-pubkey、配置文件或 {SSH_PUBKEY_ENV}）"
         )));
     }
-    let credential = match launch.credential(&read_code(launch.code.as_deref())?) {
-        Ok(credential) => credential,
-        Err(message) => return Ok(fail(&message)),
-    };
     let runtime = tokio::runtime::Handle::current();
     // The CLI always runs in-process: its user can see and answer `sudo` themselves.
     let connection = if ssh_only {

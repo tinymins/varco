@@ -80,6 +80,7 @@ fn spawn_peer(server: SocketAddr, pin: Pin, secret: Secret, name: &str) -> Peer 
         server: server.to_string(),
         pin,
         secret,
+        ssh_pubkey: None,
     };
     let (inject, from_os) = mpsc::unbounded_channel();
     let (to_os, delivered) = mpsc::unbounded_channel();

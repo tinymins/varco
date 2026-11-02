@@ -187,7 +187,7 @@
   <header class="sec-head">
     <span class="idx mono">04</span>
     <h2>远程调试，对方什么都不用装。</h2>
-    <p>对方粘贴你的公钥，打开开关，你就能从组网里连过去。交互 shell、执行命令、scp 和 sftp 都能用，<code class="mono">ssh -L</code> 可以转发到对方本机的 127.0.0.1。</p>
+    <p>把公钥编进 Code，对方粘贴、点确认，你就能从组网里连过去。交互 shell、执行命令、scp 和 sftp 都能用，<code class="mono">ssh -L</code> 可以转发到对方本机的 127.0.0.1。</p>
   </header>
   <div class="srv-grid">
 <pre class="code mono" tabindex="0" aria-label="连接内置 SSH 的示例"><span class="c"># 窗口里会显示这条命令</span>
@@ -270,7 +270,7 @@ journalctl -u varco -f</pre>
     <div class="dl-row" data-os="linux"><strong>Linux 桌面</strong><span class="dl-links"><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-gui-x64">x64</a><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-gui-arm64">ARM64</a></span><em>通过 pkexec 授权</em></div>
     <div class="dl-row" data-os="server"><strong>Linux 服务器</strong><span class="dl-links"><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-x64">x64</a><a href="https://github.com/tinymins/varco/releases/latest/download/varco-linux-arm64">ARM64</a></span><em>服务端和无界面客户端，静态链接</em></div>
   </div>
-  <p class="dl-note">要发给别人一键连上？把 Code 和公钥写进与程序同名的 <code class="mono">.toml</code>，或放进一个 <code class="mono">.cmd</code>，对方双击就能连。<a href="https://github.com/tinymins/varco#一键拉起">写法见说明 ↗</a></p>
+  <p class="dl-note">要远程协助别人？在窗口里点“生成远程协助 Code”，把 SSH 公钥编进 Code。只发这一段，对方粘贴、点确认就能连。<a href="https://github.com/tinymins/varco#一键拉起">详细说明 ↗</a></p>
   <p class="dl-more"><a href="https://github.com/tinymins/varco/releases">全部版本和校验和 ↗</a><a href="https://github.com/tinymins/varco#readme">使用说明 ↗</a></p>
 </section>
 </main>

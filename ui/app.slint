@@ -37,6 +37,8 @@ export component App inherits Window {
     in property <string> download;
     in property <[MemberRow]> members;
     in-out property <string> code;
+    // Fingerprint of the key this Code would allow to log in.
+    in property <string> code-grant;
 
     // Join without a virtual NIC. Not remembered: it is a remedy, not a preference.
     in-out property <bool> ssh-only;
@@ -53,13 +55,24 @@ export component App inherits Window {
     in property <string> ssh-configured-key;
     in property <bool> ssh-admin;
 
+    // Page for building a Code that also grants SSH.
+    in-out property <bool> show-compose;
+    in-out property <string> compose-code;
+    in-out property <string> compose-key;
+    in property <string> compose-result;
+    in property <string> compose-info;
+    in property <string> compose-error;
+
     callback confirm(string);
+    callback code-edited(string);
+    callback compose-opened();
+    callback compose-edited();
     callback disconnect();
     callback ssh-toggled(bool);
     callback ssh-pubkey-edited(string);
 
     property <bool> show-about;
-    property <bool> copied;
+    in-out property <bool> copied;
 
     copied-timer := Timer {
         interval: 1500ms;
@@ -74,23 +87,36 @@ export component App inherits Window {
         text: root.ip;
     }
 
+    compose-clipboard := TextInput {
+        visible: false;
+        width: 0; height: 0;
+        text: root.compose-result;
+    }
+
     ssh-clipboard := TextInput {
         visible: false;
         width: 0; height: 0;
         text: root.ssh-command;
     }
 
-    if !root.joined && !root.show-about: VerticalLayout {
+    if !root.joined && !root.show-about && !root.show-compose: VerticalLayout {
         padding: 24px;
         spacing: 12px;
         alignment: center;
         Text { text: "加入组网"; font-size: 20px; font-weight: 600; }
         Text { text: "请粘贴收到的 Code"; color: #666; }
         code-input := LineEdit {
-            placeholder-text: "varco1.…";
+            placeholder-text: "varco://…";
             enabled: !root.busy;
             text <=> root.code;
+            edited(value) => { root.code-edited(value); }
             accepted => { root.confirm(root.code); }
+        }
+        if root.code-grant != "": Text {
+            text: "⚠ 这个 Code 会允许持有私钥的人远程控制这台电脑（公钥 " + root.code-grant + "）";
+            color: #b42318;
+            font-weight: 600;
+            wrap: word-wrap;
         }
         CheckBox {
             text: "仅 SSH，不创建网卡";
@@ -108,9 +134,64 @@ export component App inherits Window {
             color: #b42318;
             wrap: word-wrap;
         }
+        if !root.busy: TouchArea {
+            height: 24px;
+            clicked => {
+                root.show-compose = true;
+                root.compose-opened();
+            }
+            Text { text: "生成远程协助 Code →"; color: #888; font-size: 12px; }
+        }
     }
 
-    if root.joined && !root.show-about: VerticalLayout {
+    if root.show-compose && !root.show-about: VerticalLayout {
+        padding: 24px;
+        spacing: 10px;
+        alignment: center;
+        Text { text: "生成远程协助 Code"; font-size: 20px; font-weight: 600; }
+        Text { text: "服务端 Code"; color: #666; }
+        LineEdit {
+            placeholder-text: "varco://…";
+            text <=> root.compose-code;
+            edited => { root.compose-edited(); }
+        }
+        Text { text: "你的 SSH 公钥"; color: #666; }
+        LineEdit {
+            placeholder-text: "ssh-ed25519 AAAA…";
+            text <=> root.compose-key;
+            edited => { root.compose-edited(); }
+        }
+        if root.compose-error != "": Text {
+            text: "✗ " + root.compose-error;
+            color: #b42318;
+            wrap: word-wrap;
+        }
+        if root.compose-info != "": Text {
+            text: root.compose-info;
+            color: #666;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        Button {
+            text: root.copied ? "已复制" : "复制联合 Code";
+            primary: true;
+            enabled: root.compose-result != "";
+            clicked => {
+                compose-clipboard.select-all();
+                compose-clipboard.copy();
+                root.copied = true;
+            }
+        }
+        Text {
+            text: "发给对方后，对方点确认就会让你远程控制它。";
+            color: #b54708;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        Button { text: "返回"; clicked => { root.show-compose = false; } }
+    }
+
+    if root.joined && !root.show-about && !root.show-compose: VerticalLayout {
         padding: 20px;
         // Leaves the top right corner to the About link, however long the status gets.
         padding-top: 30px;

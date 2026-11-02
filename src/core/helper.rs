@@ -302,6 +302,7 @@ mod tests {
             server: addr.to_string(),
             pin: [0; 32],
             secret: [0; 32],
+            ssh_pubkey: None,
         };
         let (mut gui, task) = pair();
         send_line(&mut gui, &code.encode()).await.unwrap();
@@ -330,6 +331,7 @@ mod tests {
             server: addr.to_string(),
             pin: [0; 32],
             secret: [0; 32],
+            ssh_pubkey: None,
         };
         let (mut gui, task) = pair();
         send_line(&mut gui, &code.encode()).await.unwrap();

@@ -1,6 +1,6 @@
 //! The window. Holds no connection logic: it starts a backend and shows its state.
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -8,6 +8,7 @@ use tokio::runtime::Handle;
 use varco::core::backend::{self, Connection};
 use varco::core::engine::{Phase, Status};
 use varco::core::ssh::{self, store, SshService, SshState};
+use varco::credential::compose;
 use varco::launch::Launch;
 
 slint::include_modules!();
@@ -105,6 +106,8 @@ fn turn_ssh_off(app: &App, runtime: &Handle, slot: &mut Option<SshService>) {
 
 struct Session {
     connection: Connection,
+    /// The key this connection was started with: used, and never remembered.
+    package_key: Option<String>,
     last_tx: u64,
     last_rx: u64,
     last_tick: Instant,
@@ -187,6 +190,76 @@ fn tick(app: &App, slot: &mut Option<Session>) {
     }
 }
 
+/// A Code that also hands over control looks like any other, so the window says
+/// so before it is confirmed.
+fn show_code_effect(app: &App, settings: &Launch, ticked_for_key: &Cell<bool>, code: &str) {
+    let credential = settings.credential(code).ok();
+    let key = credential
+        .as_ref()
+        .and_then(|credential| settings.granted_key(credential))
+        .and_then(|key| store::parse_public_key(&key).ok());
+    app.set_code_grant(match &key {
+        Some(key) => store::fingerprint(key).into(),
+        None => SharedString::new(),
+    });
+    if settings.ssh_only_explicit {
+        return;
+    }
+    let wanted = credential
+        .as_ref()
+        .is_some_and(|credential| settings.ssh_only_for(credential));
+    if wanted && !app.get_ssh_only() {
+        app.set_ssh_only(true);
+        ticked_for_key.set(true);
+    } else if !wanted && ticked_for_key.replace(false) {
+        app.set_ssh_only(false);
+    }
+}
+
+fn show_compose_result(app: &App) {
+    let code = app.get_compose_code();
+    let key = app.get_compose_key();
+    app.set_copied(false);
+    if code.trim().is_empty() || key.trim().is_empty() {
+        app.set_compose_result(SharedString::new());
+        app.set_compose_info(SharedString::new());
+        app.set_compose_error(SharedString::new());
+        return;
+    }
+    match compose(&code, &key) {
+        Ok(composed) => {
+            let replaced = if composed.replaced_key {
+                "，已替换原公钥"
+            } else {
+                ""
+            };
+            app.set_compose_result(composed.code.into());
+            app.set_compose_info(
+                format!(
+                    "服务端 {} · 公钥 {}{replaced}",
+                    composed.server, composed.key_fingerprint
+                )
+                .into(),
+            );
+            app.set_compose_error(SharedString::new());
+        }
+        Err(error) => {
+            app.set_compose_result(SharedString::new());
+            app.set_compose_info(SharedString::new());
+            app.set_compose_error(error.to_string().into());
+        }
+    }
+}
+
+/// Where most people's key already is. Only a file that holds a valid public key
+/// is offered, and nothing else in that folder is touched.
+fn default_public_key() -> Option<String> {
+    let path = dirs::home_dir()?.join(".ssh").join("id_ed25519.pub");
+    let text = std::fs::read_to_string(path).ok()?;
+    store::parse_public_key(&text).ok()?;
+    Some(text.trim().to_owned())
+}
+
 /// Whether the key in the field came with the package rather than from this window.
 fn is_configured_key(configured: Option<&str>, key: &str) -> bool {
     configured.is_some_and(|configured| configured.trim() == key.trim())
@@ -244,12 +317,43 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
     let session: Rc<RefCell<Option<Session>>> = Rc::default();
     let ssh_service: Rc<RefCell<Option<SshService>>> = Rc::default();
     let settings = Rc::new(Launch {
-        code: launch.code.clone(),
-        server: launch.server.clone(),
-        port: launch.port,
-        ssh_pubkey: launch.ssh_pubkey.clone(),
-        ssh_only: launch.ssh_only,
         problem: None,
+        ..launch.clone()
+    });
+    let ticked_for_key = Rc::new(Cell::new(false));
+
+    let weak = app.as_weak();
+    let edit_settings = settings.clone();
+    let edit_ticked = ticked_for_key.clone();
+    app.on_code_edited(move |code| {
+        if let Some(app) = weak.upgrade() {
+            show_code_effect(&app, &edit_settings, &edit_ticked, &code);
+        }
+    });
+
+    let weak = app.as_weak();
+    app.on_compose_opened(move || {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if app.get_compose_code().is_empty() {
+            app.set_compose_code(app.get_code());
+        }
+        if app.get_compose_key().is_empty() {
+            let key = store::Store::open_default()
+                .ok()
+                .and_then(|s| s.load_authorized_key())
+                .or_else(default_public_key);
+            app.set_compose_key(key.unwrap_or_default().into());
+        }
+        show_compose_result(&app);
+    });
+
+    let weak = app.as_weak();
+    app.on_compose_edited(move || {
+        if let Some(app) = weak.upgrade() {
+            show_compose_result(&app);
+        }
     });
 
     let weak = app.as_weak();
@@ -273,6 +377,7 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
                 return;
             }
         };
+        let package_key = confirm_settings.granted_key(&credential);
         app.set_busy(true);
         let connection = if app.get_ssh_only() {
             backend::start_ssh_only(&confirm_runtime, credential)
@@ -280,13 +385,15 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
             backend::start(&confirm_runtime, credential)
         };
         // Also on a retry: the server stops with every connection that fails.
-        let configured = confirm_settings.ssh_pubkey.as_deref();
-        if is_configured_key(configured, &app.get_ssh_pubkey()) {
+        if let Some(key) = &package_key {
+            show_key_validity(&app, key);
+            app.set_ssh_pubkey(key.as_str().into());
             *confirm_service.borrow_mut() =
-                start_ssh(&app, &confirm_runtime, &connection, configured);
+                start_ssh(&app, &confirm_runtime, &connection, Some(key));
         }
         *slot = Some(Session {
             connection,
+            package_key,
             last_tx: 0,
             last_rx: 0,
             last_tick: Instant::now(),
@@ -326,7 +433,6 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
     let toggle_session = session.clone();
     let toggle_service = ssh_service.clone();
     let toggle_runtime = runtime.clone();
-    let toggle_settings = settings.clone();
     app.on_ssh_toggled(move |on| {
         let Some(app) = weak.upgrade() else {
             return;
@@ -345,7 +451,7 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
             &app,
             &toggle_runtime,
             &active.connection,
-            toggle_settings.ssh_pubkey.as_deref(),
+            active.package_key.as_deref(),
         );
     });
 
@@ -370,6 +476,7 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
     // Everything above is wired up, so this behaves exactly like a person clicking.
     if let Some(code) = &settings.code {
         app.set_code(code.as_str().into());
+        show_code_effect(&app, &settings, &ticked_for_key, code);
     }
     let key_is_usable = settings
         .ssh_pubkey

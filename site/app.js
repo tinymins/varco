@@ -70,7 +70,7 @@
   }
 
   // The hero window plays the same steps a person goes through.
-  var SAMPLE = "varco1.q7Hk2mXzP0vLtR9dYwN4sBfE8uGc";
+  var SAMPLE = "varco://q7Hk2mXzP0vLtR9dYwN4sBfE8uGc";
   var demo = document.getElementById("demo");
   if (!demo) return;
   var panes = {

@@ -323,6 +323,38 @@ check  "and names the file" ex s1 "grep -q 'tool-1.2.3-x.toml' /tmp/bad.log"
 refuse "and does not print the code" ex s1 "grep -qF '$CODE_A' /tmp/bad.log"
 ex s1 "rm -f $CONF"
 
+echo "== one Code carries the SSH key"
+ex s1 "pkill -x varco; pkill -x tool-1.2.3-x; true"; sleep 1
+JOINT=$(ex a1 "$BIN code add-ssh-key --code $CODE_A --ssh-pubkey /tmp/id.pub" | grep '^varco://')
+[ -n "$JOINT" ] && ok "add-ssh-key reads a key file and prints a Code" || bad "add-ssh-key printed no Code"
+start_code() { ex s1 "rm -f /tmp/joint.log"; docker exec -d -e "VARCO_CREDENTIAL=$1" varco-s1 bash -c "$BIN </dev/null >/tmp/joint.log 2>&1"; }
+wait_code_ip() { for _ in $(seq 40); do local ip; ip=$(ssh_ip_in /tmp/joint.log); [ -n "$ip" ] && { echo "$ip"; return 0; }; sleep 0.5; done; return 1; }
+stop_code() { ex s1 "pkill -INT -x varco; true"; sleep 2; }
+start_code "$JOINT"
+IP_J=$(wait_code_ip)
+if [ -n "$IP_J" ]; then ok "the Code alone joins and starts SSH, with no server restart"; else bad "the Code did not start SSH"; ex s1 "cat /tmp/joint.log"; fi
+[ -z "$(mesh_ip s1)" ] && ok "a key in the Code defaults to SSH-only" || bad "a NIC appeared"
+check  "and says who gets control" ex s1 "grep -q '远程控制' /tmp/joint.log"
+[ "$(sshc "$IP_J" 'echo from-code')" = "from-code" ] && ok "ssh works with the key in the Code" || bad "ssh failed with the key in the Code"
+refuse "ssh with another key is refused" ex a1 "ssh -i /tmp/other -o IdentitiesOnly=yes $SSH_OPTS root@$IP_J true"
+stop_code
+check  "the Code without the key still works" wait_ping a1 "$IP_A2" 30
+
+OUT_K=$(ex srv "$BIN server -c /etc/varco/config.toml gen-credential --network a --ssh-pubkey '$PUBKEY'")
+CODE_K=$(code "$OUT_K")
+ex srv "sed -i '/name = \"a\"/{n;s|credentials = \[|credentials = [\"$(secret "$OUT_K")\", |}' /etc/varco/config.toml"
+stop_server; sleep 2; start_server; sleep 3
+start_code "$CODE_K"
+IP_J=$(wait_code_ip)
+[ "$(sshc "$IP_J" 'echo from-gen' 2>/dev/null)" = "from-gen" ] && ok "gen-credential --ssh-pubkey makes a working Code" || { bad "gen-credential Code failed"; ex s1 "cat /tmp/joint.log"; }
+stop_code
+
+ex a1 "$BIN code add-ssh-key --code $CODE_A --ssh-pubkey /tmp/id >/tmp/priv.log 2>&1"
+[ $? != 0 ] && ok "a private key is refused" || bad "a private key was accepted"
+refuse "and is not printed" ex a1 "grep -q 'PRIVATE\|^b3Blbn' /tmp/priv.log"
+ex a1 "VARCO_CREDENTIAL=varco1.AAAA $BIN >/tmp/old.log 2>&1"
+check  "the old Code format is refused" ex a1 "grep -q '格式不正确' /tmp/old.log"
+
 echo "== secrets stay out of logs"
 SECRET_VALUE=$(secret "$OUT_A")
 refuse "secret absent from server log" ex srv "grep -qF '$SECRET_VALUE' /tmp/server.log"

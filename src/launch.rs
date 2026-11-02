@@ -16,13 +16,15 @@ pub struct Options {
     pub ssh_only: Option<bool>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Launch {
     pub code: Option<String>,
     pub server: Option<String>,
     pub port: Option<u16>,
     pub ssh_pubkey: Option<String>,
     pub ssh_only: bool,
+    /// Said outright, so a key inside the Code must not change it.
+    pub ssh_only_explicit: bool,
     /// The settings file could not be used. Nothing should start by itself.
     pub problem: Option<String>,
 }
@@ -52,6 +54,9 @@ pub fn resolve(cli: Options, env: Options, file: Options) -> Launch {
             .or(env.ssh_only)
             .or(file.ssh_only)
             .unwrap_or(default_ssh_only),
+        ssh_only_explicit: cli.ssh_only.is_some()
+            || env.ssh_only.is_some()
+            || file.ssh_only.is_some(),
         problem: None,
     }
 }
@@ -120,11 +125,27 @@ impl Launch {
             .with_address(self.server.as_deref(), self.port)
             .map_err(|_| "服务端地址或端口无效".to_owned())
     }
+
+    /// Who may log in once this Code is used: a key given to the program directly
+    /// wins over one carried in the Code.
+    pub fn granted_key(&self, credential: &Credential) -> Option<String> {
+        self.ssh_pubkey
+            .clone()
+            .or_else(|| credential.ssh_pubkey_text())
+    }
+
+    pub fn ssh_only_for(&self, credential: &Credential) -> bool {
+        if self.ssh_only_explicit {
+            return self.ssh_only;
+        }
+        self.ssh_only || credential.ssh_pubkey.is_some()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ssh::store;
 
     fn with_code(code: &str) -> Options {
         Options {
@@ -183,9 +204,9 @@ mod tests {
     #[test]
     fn file_mistakes_are_named_without_quoting_the_secret() {
         for text in [
-            "cod = \"varco1.SECRET\"\n",
-            "code = \"varco1.SECRET\"\nport = \"x\"\n",
-            "code = \"varco1.SECRET\n",
+            "cod = \"varco://SECRET\"\n",
+            "code = \"varco://SECRET\"\nport = \"x\"\n",
+            "code = \"varco://SECRET\n",
         ] {
             let problem = parse_file(text, "t.toml").err().unwrap();
             assert!(problem.contains("t.toml"), "{problem}");
@@ -264,6 +285,7 @@ mod tests {
             server: "code.example.com:8443".into(),
             pin: [7; 32],
             secret: [9; 32],
+            ssh_pubkey: None,
         }
         .encode()
     }
@@ -296,12 +318,55 @@ mod tests {
     #[test]
     fn a_different_code_keeps_its_own_address() {
         let launch = Launch {
-            code: Some("varco1.another".into()),
+            code: Some("varco://another".into()),
             server: Some("other.example.com".into()),
             ..Launch::default()
         };
         let credential = launch.credential(&sample_code()).unwrap();
         assert_eq!(credential.server, "code.example.com:8443");
+    }
+
+    const KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+
+    fn code_with_key() -> Credential {
+        Credential::parse(&sample_code())
+            .unwrap()
+            .with_ssh_pubkey(store::parse_public_key(KEY).unwrap())
+    }
+
+    #[test]
+    fn a_key_in_the_code_grants_login_and_defaults_to_ssh_only() {
+        let launch = Launch::default();
+        assert_eq!(launch.granted_key(&code_with_key()).as_deref(), Some(KEY));
+        assert!(launch.ssh_only_for(&code_with_key()));
+    }
+
+    #[test]
+    fn a_plain_code_changes_nothing() {
+        let plain = Credential::parse(&sample_code()).unwrap();
+        let launch = Launch::default();
+        assert_eq!(launch.granted_key(&plain), None);
+        assert!(!launch.ssh_only_for(&plain));
+    }
+
+    #[test]
+    fn a_key_given_directly_beats_the_one_in_the_code() {
+        let launch = resolve(with_key("direct"), none(), none());
+        assert_eq!(
+            launch.granted_key(&code_with_key()).as_deref(),
+            Some("direct")
+        );
+    }
+
+    #[test]
+    fn an_explicit_choice_beats_the_key_in_the_code() {
+        let refused = Options {
+            ssh_only: Some(false),
+            ..none()
+        };
+        let launch = resolve(refused, none(), none());
+        assert!(!launch.ssh_only_for(&code_with_key()));
     }
 
     #[test]

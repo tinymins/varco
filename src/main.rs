@@ -5,10 +5,13 @@ mod cli;
 #[cfg(feature = "gui")]
 mod gui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use russh::keys::PublicKey;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use varco::core::ssh::store;
+use varco::credential::compose;
 use varco::launch::{self, Launch, Options};
 
 #[derive(Parser)]
@@ -38,6 +41,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 处理已有的 Code（离线，不需要服务端）
+    Code {
+        #[command(subcommand)]
+        action: CodeAction,
+    },
     /// 运行服务端
     Server {
         #[arg(short, long, default_value = "/etc/varco/config.toml")]
@@ -60,7 +68,34 @@ enum ServerAction {
     GenCredential {
         #[arg(long)]
         network: String,
+        /// 编进 Code 的 SSH 公钥（文件路径或公钥文本），对方点确认后自动开启 SSH
+        #[arg(long, value_name = "KEY")]
+        ssh_pubkey: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum CodeAction {
+    /// 把 SSH 公钥编进已有的 Code，不用改服务端配置
+    AddSshKey {
+        #[arg(long, value_name = "CODE")]
+        code: String,
+        /// 文件路径或公钥文本
+        #[arg(long, value_name = "KEY")]
+        ssh_pubkey: String,
+    },
+}
+
+/// A path or the key itself. Never echoes the input, which could be a private key
+/// passed by mistake.
+fn read_public_key(argument: &str) -> Result<PublicKey> {
+    let path = Path::new(argument);
+    let text = if path.is_file() {
+        std::fs::read_to_string(path).with_context(|| format!("无法读取 {}", path.display()))?
+    } else {
+        argument.to_owned()
+    };
+    Ok(store::parse_public_key(&text)?)
 }
 
 fn init_logging() {
@@ -148,13 +183,36 @@ fn main() -> Result<ExitCode> {
         }
         Some(Command::Server {
             config,
-            action: Some(ServerAction::GenCredential { network }),
+            action:
+                Some(ServerAction::GenCredential {
+                    network,
+                    ssh_pubkey,
+                }),
         }) => {
-            let (secret, credential) = varco::server::generate_credential(&config, &network)?;
+            let key = ssh_pubkey.as_deref().map(read_public_key).transpose()?;
+            let shown_key = key.as_ref().map(store::fingerprint);
+            let (secret, credential) = varco::server::generate_credential(&config, &network, key)?;
             println!("1. 把下面这行加入配置里 {network} 的 credentials，然后重启服务端：");
             println!("   \"{secret}\"");
             println!("2. 把下面的 Code 发给对方：");
             println!("   {credential}");
+            if let Some(shown_key) = shown_key {
+                println!("对方点确认后，持有这把私钥的人能远程控制对方电脑：{shown_key}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Code {
+            action: CodeAction::AddSshKey { code, ssh_pubkey },
+        }) => {
+            let key = read_public_key(&ssh_pubkey)?;
+            let text = key.to_openssh().context("公钥无效")?;
+            let composed = compose(&code, &text)?;
+            println!("{}", composed.code);
+            println!(
+                "服务端 {}，公钥 {}",
+                composed.server, composed.key_fingerprint
+            );
+            println!("对方点确认后，持有这把私钥的人能远程控制对方电脑。");
             Ok(ExitCode::SUCCESS)
         }
         #[cfg(unix)]

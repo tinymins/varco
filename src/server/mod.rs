@@ -235,7 +235,13 @@ async fn write_loop<W: AsyncWrite + Unpin>(
 }
 
 /// `gen-credential`: creates a secret and the full string for that network.
-pub fn generate_credential(config_path: &Path, network: &str) -> Result<(String, String)> {
+/// `ssh_pubkey` goes into the Code only. It is the client that acts on it, so
+/// nothing about it reaches this server's configuration.
+pub fn generate_credential(
+    config_path: &Path,
+    network: &str,
+    ssh_pubkey: Option<russh::keys::PublicKey>,
+) -> Result<(String, String)> {
     let config = Config::load(config_path)?;
     anyhow::ensure!(
         config.networks.iter().any(|n| n.name == network),
@@ -248,6 +254,11 @@ pub fn generate_credential(config_path: &Path, network: &str) -> Result<(String,
         server: config.public_addr,
         pin: identity.pin,
         secret,
+        ssh_pubkey: None,
+    };
+    let credential = match ssh_pubkey {
+        Some(key) => credential.with_ssh_pubkey(key),
+        None => credential,
     };
     Ok((encode_secret(&secret), credential.encode()))
 }

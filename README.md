@@ -89,37 +89,46 @@ VARCO_CREDENTIAL=<Code> VARCO_SSH_PUBKEY=<公钥> varco --ssh-only
 
 ### 一键拉起
 
-把设置放在程序旁边，或者写进一个 `.cmd`，对方双击就能连上，不用再粘贴。
+把你的 SSH 公钥编进 Code，**只发这一段 Code**：对方粘贴、点确认，就同时完成入网和开启 SSH，默认用[仅 SSH 模式](#仅-ssh-模式)，不创建网卡。
 
-**配置文件**放在程序同目录，与程序同名，例如 `varco-windows-x64.exe` 对应 `varco-windows-x64.toml`：
+**生成**，三种方式都不需要联网，密钥不变，已配置的凭证继续有效：
+
+- **窗口**：在加入页点“生成远程协助 Code”，填入 Code 和公钥，点“复制联合 Code”。
+- **已有 Code**：`varco code add-ssh-key --code <Code> --ssh-pubkey ~/.ssh/id_ed25519.pub`，不用改服务端配置，也不用重启。
+- **新客户**：`varco server gen-credential --network customer-a --ssh-pubkey ~/.ssh/id_ed25519.pub`，和平时一样要把密钥加入配置并重启服务端。
+
+公钥可以写文件路径或公钥文本。
+
+**对方看到什么**：粘贴后、点确认前，窗口会用红字提示“这个 Code 会允许持有私钥的人远程控制这台电脑”，并显示公钥指纹。连接后已连接页也会显示指纹，关闭窗口即断开。
+
+**也可以不用粘贴**：把设置放在程序旁边的同名配置文件里（`varco-windows-x64.exe` 对应 `varco-windows-x64.toml`），或者写进一个 `.cmd`，对方双击就能连上：
 
 ```toml
-code = "varco1.…"                          # 必填才会自动加入
-ssh_pubkey = "ssh-ed25519 AAAA… me@host"   # 加入后自动开启 SSH
+code = "varco://…"
 # 以下可选
+ssh_pubkey = "ssh-ed25519 AAAA… me@host"   # 优先于 Code 里的公钥
 server = "vpn.example.com"                 # 代替 Code 里的服务端地址
 port = 8443                                # 代替 Code 里的端口
-ssh_only = false                           # 默认：提供了公钥时为 true
+ssh_only = false                           # 默认：有公钥时为 true
 ```
-
-**命令行**参数相同，放进 `.cmd` 就是一键启动：
 
 ```bat
 @echo off
-"%~dp0varco-windows-x64.exe" --code "varco1.…" --ssh-pubkey "ssh-ed25519 AAAA… me@host"
+"%~dp0varco-windows-x64.exe" --code "varco://…"
 ```
 
-- **优先级**：命令行 > 环境变量（`VARCO_CREDENTIAL`、`VARCO_SSH_PUBKEY`）> 配置文件。
-- **效果**：有 Code 就打开窗口并自动加入；再有公钥就同时开启 SSH，并默认用[仅 SSH 模式](#仅-ssh-模式)，不创建网卡。窗口始终可见，并显示可登录公钥的指纹，关闭窗口即断开。
+- **优先级**：命令行（`--code`、`--ssh-pubkey`、`--server`、`--port`、`--ssh-only`）> 环境变量（`VARCO_CREDENTIAL`、`VARCO_SSH_PUBKEY`）> 配置文件。
 - **改地址是安全的**：`server` 和 `port` 只改变连接目标，证书指纹和密钥仍来自 Code。指向别的服务器只会连接失败，密钥不会发出。
 - **写错不会被忽略**：配置文件有错、公钥或 Code 无效时不会连接，并提示原因。
-- **公钥不会被记住**：这样传入的公钥不写入用户目录，删掉配置文件就不再有效。
+- **公钥不会被记住**：Code、配置文件或命令行带来的公钥不写入用户目录。
 
 使用前请注意：
 
-- 配置文件和 `.cmd` 里的 Code 是明文密钥，要像 Code 一样保管。
+- **带公钥的 Code 等于远程控制权。** 普通 Code 只能入网，这种 Code 还会把这台电脑的控制权交给私钥持有者，Windows 上是管理员权限。只发给知情并同意的人；收到的人也只应使用可信来源的 Code，并核对指纹。Code 没有签名，拿到 Code 的人可以换掉里面的公钥。
+- Code 是明文密钥，配置文件和 `.cmd` 要像 Code 一样保管。
 - 命令行参数能被本机其他进程看到，多人共用的电脑上请用配置文件。
-- 运行带公钥的包，等于把这台电脑的控制权交给私钥持有者。只发给知情并同意的人。
+
+**v0.3.0 起 Code 改为 `varco://` 格式**，不再接受旧的 `varco1.`。旧 Code 要重新生成，并把新密钥加入服务端配置；旧版程序也读不了新 Code，需要一起更新。
 
 macOS 的 `varco.app` 请把配置放在 `varco.app/Contents/MacOS/varco.toml`，或直接用命令行参数。
 
