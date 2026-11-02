@@ -230,6 +230,12 @@ async fn interactive_shell_runs_in_a_pty() {
         .await
         .unwrap();
     channel.request_shell(true).await.unwrap();
+    // ConPTY asks the terminal where the cursor is and waits for the answer.
+    // Real terminals reply on their own; this client has to do it itself.
+    if cfg!(windows) {
+        read_until(&mut channel, "\x1b[6n").await;
+        channel.data(&b"\x1b[1;1R"[..]).await.unwrap();
+    }
     // Assembled by the shell, so plain echo of the input cannot satisfy the check.
     let line: &[u8] = if cfg!(windows) {
         b"Write-Output ('mark' + 'er-42')\r\n"
