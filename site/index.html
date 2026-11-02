@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>varco — 一段 Code，接入一张私有网络</title>
-<meta name="description" content="跨平台 TCP 组网工具。打开程序，粘贴 Code，点确认。组网内的机器彼此互通，除此之外什么也访问不了。">
+<meta name="description" content="跨平台 TCP 组网工具。打开程序，粘贴 Code，点确认。组网内的机器彼此互通，除此之外什么也访问不了。内置 SSH 远程调试，建不起虚拟网卡也能连。">
 <link rel="canonical" href="https://lab.vmins.com/varco/">
 <meta name="theme-color" content="#f3f0e8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#11100d" media="(prefers-color-scheme: dark)">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="varco">
 <meta property="og:title" content="varco — 一段 Code，接入一张私有网络">
-<meta property="og:description" content="跨平台 TCP 组网工具。组网内的机器彼此互通，除此之外什么也访问不了。">
+<meta property="og:description" content="跨平台 TCP 组网工具。组网内的机器彼此互通，除此之外什么也访问不了。内置 SSH 远程调试，建不起虚拟网卡也能连。">
 <meta property="og:url" content="https://lab.vmins.com/varco/">
 <meta property="og:image" content="https://lab.vmins.com/varco/og.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -28,8 +28,9 @@
     <a href="#how">工作方式</a>
     <a href="#isolation">隔离</a>
     <a href="#stability">稳定性</a>
+    <a href="#ssh">内置 SSH</a>
     <a href="#server">服务端</a>
-    <a class="nav-cta" href="#download">下载</a>
+    <a class="nav-cta" data-direct-download data-short href="#download">下载</a>
   </nav>
 </header>
 
@@ -42,11 +43,12 @@
   <div class="hero-grid">
     <div class="hero-copy">
       <h1>一段 Code，<br>接入一张私有网络。</h1>
-      <p class="lede">打开程序，粘贴 Code，点确认。组网内的机器彼此互通，除此之外什么也访问不了。</p>
+      <p class="lede">打开程序，粘贴 Code，点确认。组网内的机器彼此互通，除此之外什么也访问不了。要远程调试，内置 SSH 不用对方安装任何东西，建不起虚拟网卡也能连。</p>
       <div class="actions">
-        <a class="btn primary" id="primary-download" href="#download">下载客户端</a>
+        <a class="btn primary" data-direct-download href="#download">选择版本下载</a>
         <a class="btn" href="https://github.com/tinymins/varco">查看源码 ↗</a>
       </div>
+      <p class="other-versions"><a href="#download">其他平台和版本</a></p>
       <p class="facts mono">Windows · macOS · Linux<br>单文件 · 只走一个 TCP 端口</p>
     </div>
 
@@ -181,9 +183,36 @@
   </div>
 </section>
 
-<section class="srv" id="server">
+<section class="ssh" id="ssh">
   <header class="sec-head">
     <span class="idx mono">04</span>
+    <h2>远程调试，对方什么都不用装。</h2>
+    <p>对方粘贴你的公钥，打开开关，你就能从组网里连过去。交互 shell、执行命令、scp 和 sftp 都能用，<code class="mono">ssh -L</code> 可以转发到对方本机的 127.0.0.1。</p>
+  </header>
+  <div class="srv-grid">
+<pre class="code mono" tabindex="0" aria-label="连接内置 SSH 的示例"><span class="c"># 窗口里会显示这条命令</span>
+ssh -p 2222 emil@10.77.1.3
+
+<span class="c"># 传文件</span>
+scp -P 2222 app.log emil@10.77.1.3:/tmp/
+
+<span class="c"># 连对方本机的调试端口</span>
+ssh -p 2222 -L 9229:127.0.0.1:9229 emil@10.77.1.3</pre>
+    <dl class="ssh-points">
+      <dt>只认一把公钥</dt>
+      <dd>没有密码登录，只有同一网络的成员能连到端口。</dd>
+      <dt>默认关闭，关了就干净</dt>
+      <dd>每次启动都是关的。关开关、断开组网或关闭窗口，所有会话和它们启动的进程都会结束。</dd>
+      <dt>建不起网卡也能连</dt>
+      <dd>勾选“仅 SSH，不创建网卡”后，程序自己处理组网流量，只接受 SSH 端口，不改网卡、路由和防火墙。系统网络配置被拦截时，只要还能连到服务端，就能连上去排查。</dd>
+    </dl>
+  </div>
+  <p class="note ssh-note"><strong>开启后，持有私钥的人能完全控制这台电脑。</strong>Windows 上远程 shell 是管理员权限，不用时请关闭。</p>
+</section>
+
+<section class="srv" id="server">
+  <header class="sec-head">
+    <span class="idx mono">05</span>
     <h2>服务端只有一个进程，一个文件。</h2>
     <p>没有数据库，没有管理后台，没有内核模块，也不需要 root。配置里只有地址、网段和凭证。</p>
   </header>
@@ -211,7 +240,7 @@ journalctl -u varco -f</pre>
 
 <section class="honest" id="limits">
   <header class="sec-head">
-    <span class="idx mono">05</span>
+    <span class="idx mono">06</span>
     <h2>它不做什么。</h2>
     <p>够简单才够稳定。下面这些是有意的取舍，用之前应该知道。</p>
   </header>
@@ -223,7 +252,7 @@ journalctl -u varco -f</pre>
     <dt>网络替换证书时连不上</dt>
     <dd>证书指纹被固定在 Code 里。如果网络在解密 TLS，连接会中止并提示原因，不会绕过。</dd>
     <dt>程序没有正式代码签名</dt>
-    <dd>首次运行可能被 SmartScreen 或 Gatekeeper 拦截。需要提权，因为创建虚拟网卡要管理员权限。</dd>
+    <dd>首次运行可能被 SmartScreen 或 Gatekeeper 拦截。普通模式需要提权，因为创建虚拟网卡要管理员权限。</dd>
     <dt>只支持 IPv4</dt>
     <dd>没有审批流、凭证有效期、托盘常驻和开机自启。撤销凭证就是从配置里删掉再重启服务。</dd>
   </dl>
@@ -231,8 +260,8 @@ journalctl -u varco -f</pre>
 
 <section class="dl" id="download">
   <header class="sec-head">
-    <span class="idx mono">06</span>
-    <h2>下载</h2>
+    <span class="idx mono">07</span>
+    <h2>全部下载</h2>
     <p>一个文件，不用安装。Windows 自带 Wintun 驱动，点开就能用。</p>
   </header>
   <div class="dl-table" id="dl-table">

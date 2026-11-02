@@ -2,22 +2,71 @@
   "use strict";
   var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  // Points people at the build for their own system.
+  // Download buttons fetch the build for this system. Anything unrecognised, such
+  // as a phone, keeps the link to the full list: there is no build to offer it.
+  var RELEASES = "https://github.com/tinymins/varco/releases/latest/download/";
+  var BUILDS = {
+    windows: {
+      name: "Windows", row: "windows",
+      x64: { file: "varco-windows-x64.exe", label: "x64" },
+      arm64: { file: "varco-windows-arm64.exe", label: "ARM64" }
+    },
+    macos: {
+      name: "macOS", row: "macos",
+      x64: { file: "varco-macos-x64.zip", label: "Intel" },
+      arm64: { file: "varco-macos-arm64.zip", label: "Apple 芯片" }
+    },
+    linux: {
+      name: "Linux", row: "linux",
+      x64: { file: "varco-linux-gui-x64", label: "x64" },
+      arm64: { file: "varco-linux-gui-arm64", label: "ARM64" }
+    }
+  };
+
   function detectOs() {
     var text = (navigator.userAgent + " " + (navigator.platform || "")).toLowerCase();
-    if (/android|iphone|ipad/.test(text)) return null;
-    if (text.indexOf("win") !== -1) return "windows";
+    if (/android|iphone|ipad|ipod/.test(text)) return null;
+    // iPadOS asks for desktop sites and calls itself a Mac; only touch gives it away.
+    if (text.indexOf("mac") !== -1 && navigator.maxTouchPoints > 1) return null;
+    if (text.indexOf("windows") !== -1 || text.indexOf("win32") !== -1) return "windows";
     if (text.indexOf("mac") !== -1) return "macos";
     if (text.indexOf("linux") !== -1) return "linux";
     return null;
   }
+
+  // Browsers on Macs always claim Intel, and most Macs in use are not.
+  function guessArch(os) {
+    var text = (navigator.userAgent + " " + (navigator.platform || "")).toLowerCase();
+    if (/aarch64|arm64/.test(text)) return "arm64";
+    if (os === "macos") return "arm64";
+    return "x64";
+  }
+
+  function applyBuild(os, arch) {
+    var build = BUILDS[os];
+    var target = build[arch];
+    var links = document.querySelectorAll("[data-direct-download]");
+    Array.prototype.forEach.call(links, function (link) {
+      link.href = RELEASES + target.file;
+      if (!link.hasAttribute("data-short")) {
+        link.textContent = "下载 " + build.name + " 版（" + target.label + "）";
+      }
+    });
+  }
+
   var os = detectOs();
   if (os) {
-    var row = document.querySelector('.dl-row[data-os="' + os + '"]');
+    var row = document.querySelector('.dl-row[data-os="' + BUILDS[os].row + '"]');
     if (row) row.classList.add("current");
-    var names = { windows: "Windows", macos: "macOS", linux: "Linux" };
-    var primary = document.getElementById("primary-download");
-    if (primary) primary.textContent = "下载 " + names[os] + " 版";
+    applyBuild(os, guessArch(os));
+    // Chromium hides the real architecture from the user agent but will tell if asked.
+    var hints = navigator.userAgentData;
+    if (hints && hints.getHighEntropyValues) {
+      hints.getHighEntropyValues(["architecture"]).then(function (values) {
+        if (values.architecture === "arm") applyBuild(os, "arm64");
+        else if (values.architecture === "x86") applyBuild(os, "x64");
+      }).catch(function () {});
+    }
   }
 
   // The hero window plays the same steps a person goes through.
