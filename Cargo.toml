@@ -38,6 +38,7 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tun-rs = { version = "2.8", features = ["async_tokio"] }
+smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-tcp-reno", "auto-icmp-echo-reply"] }
 slint = { version = "1.18", optional = true, default-features = false, features = ["std", "compat-1-18", "backend-winit", "renderer-winit-software"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -219,8 +219,13 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
             }
         };
         app.set_busy(true);
+        let connection = if app.get_ssh_only() {
+            backend::start_ssh_only(&confirm_runtime, credential)
+        } else {
+            backend::start(&confirm_runtime, credential)
+        };
         *slot = Some(Session {
-            connection: backend::start(&confirm_runtime, credential),
+            connection,
             last_tx: 0,
             last_rx: 0,
             last_tick: Instant::now(),
@@ -280,6 +285,7 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
                     allowed,
                     host_key,
                     active.connection.status.clone(),
+                    active.connection.ssh_source.clone(),
                 );
                 app.set_ssh_fingerprint(started.host_fingerprint.as_str().into());
                 show_ssh(&app, &started);

@@ -5,7 +5,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 NET=varco-e2e; IMG=varco-e2e; VOL=varco-e2e-target; PORT=8443
-NODES=(srv a1 a2 a3 b1)
+# s1 has no TUN access at all: it proves SSH-only mode needs none.
+NODES=(srv a1 a2 a3 b1 s1)
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
@@ -29,8 +30,10 @@ docker run --rm -v "$PWD:/src:ro" -v "$VOL:/target" -w /src -e CARGO_TARGET_DIR=
 
 docker network create "$NET" >/dev/null
 for n in "${NODES[@]}"; do
+  tun=(--cap-add NET_ADMIN --device /dev/net/tun)
+  [ "$n" = s1 ] && tun=()
   docker run -d --name "varco-$n" --hostname "$n" --network "$NET" \
-    --cap-add NET_ADMIN --device /dev/net/tun -v "$VOL:/target:ro" \
+    ${tun[@]+"${tun[@]}"} -v "$VOL:/target:ro" \
     "$IMG" sleep infinity >/dev/null
 done
 docker exec -i varco-srv bash -c 'mkdir -p /etc/varco && cat > /etc/varco/config.toml' <<CFG
@@ -211,6 +214,52 @@ check  "a remote process is running" ex a3 "pgrep -f '[s]leep 987'"
 ex a3 "pkill -INT -x varco"
 sleep 3
 refuse "leaving ends remote processes" ex a3 "pgrep -f '[s]leep 987'"
+
+echo "== SSH-only mode: no virtual NIC"
+refuse "refuses to start without a key" ex s1 "VARCO_CREDENTIAL=$CODE_A $BIN --ssh-only"
+docker exec -d -e "VARCO_CREDENTIAL=$CODE_A" -e "VARCO_SSH_PUBKEY=$PUBKEY" varco-s1 bash -c "$BIN --ssh-only >>/tmp/client-ssh.log 2>&1"
+IP_O=""
+for _ in $(seq 60); do
+  IP_O=$(ex s1 "sed -n 's/^SSH 已开启：\([0-9.]*\):.*/\1/p' /tmp/client-ssh.log | tail -1" 2>/dev/null)
+  [ -n "$IP_O" ] && break
+  sleep 0.5
+done
+echo "  ssh-only s1=$IP_O"
+[ -n "$IP_O" ] || { bad "ssh-only client never came up"; ex s1 'cat /tmp/client-ssh.log'; }
+[ -z "$(mesh_ip s1)" ] && ok "no network interface was added" || bad "an interface appeared"
+sshz() { ex a1 "ssh -i /tmp/id $SSH_OPTS root@$IP_O $(printf '%q' "$1")"; }
+SCP_OPTS="${SSH_OPTS/-p $SSH_PORT/-P $SSH_PORT}"
+check  "answers ping" wait_ping a1 "$IP_O" 10
+[ "$(sshz 'echo ok-$((6*7))')" = "ok-42" ] && ok "ssh with the right key runs a command" || bad "ssh command failed"
+refuse "ssh with another key is refused" ex a1 "ssh -i /tmp/other -o IdentitiesOnly=yes $SSH_OPTS root@$IP_O true"
+ex a1 "head -c 3000000 /dev/urandom > /tmp/only-up; sha256sum < /tmp/only-up > /tmp/only-up.sum"
+ex a1 "scp -i /tmp/id $SCP_OPTS /tmp/only-up root@$IP_O:/tmp/only-landed && scp -i /tmp/id $SCP_OPTS root@$IP_O:/tmp/only-landed /tmp/only-back" 2>&1 | tail -1
+[ "$(ex s1 'sha256sum < /tmp/only-landed' 2>/dev/null)" = "$(ex a1 'cat /tmp/only-up.sum')" ] && [ "$(ex a1 'sha256sum < /tmp/only-back' 2>/dev/null)" = "$(ex a1 'cat /tmp/only-up.sum')" ] && ok "scp both ways, 3 MB intact" || bad "scp round trip differs"
+ex a1 "printf 'put /tmp/only-up /tmp/only-sftp\nbye\n' | sftp -q -i /tmp/id $SCP_OPTS -b - root@$IP_O" >/dev/null 2>&1
+[ "$(ex s1 'sha256sum < /tmp/only-sftp' 2>/dev/null)" = "$(ex a1 'cat /tmp/only-up.sum')" ] && ok "sftp upload intact" || bad "sftp upload differs"
+docker exec -d varco-s1 bash -c "echo via-loopback | nc -l -p 9100 -s 127.0.0.1 -q1"
+docker exec -d varco-a1 bash -c "ssh -i /tmp/id $SSH_OPTS -N -L 9111:127.0.0.1:9100 root@$IP_O"
+sleep 2
+[ "$(ex a1 'nc -w3 127.0.0.1 9111 </dev/null')" = "via-loopback" ] && ok "ssh -L reaches the machine's own loopback" || bad "ssh -L to loopback failed"
+docker exec -d varco-s1 bash -c "nc -l -p 9112 -k >/dev/null"
+sleep 1
+refuse "other ports stay closed, even with a listener behind them" ex a1 "nc -z -w3 $IP_O 9112"
+check  "another network cannot reach the port" check_closed b1 "$IP_O"
+S1_ETH=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' varco-s1)
+check  "the machine's real address has no SSH" check_closed a1 "$S1_ETH"
+stop_server; sleep 2; start_server
+RECOVERED=""
+for _ in $(seq 60); do
+  [ "$(sshz 'echo back' 2>/dev/null)" = "back" ] && { RECOVERED=yes; break; }
+  sleep 1
+done
+[ -n "$RECOVERED" ] && ok "ssh works again after the server restarts" || bad "ssh did not come back"
+docker exec -d varco-a1 bash -c "ssh -i /tmp/id $SSH_OPTS root@$IP_O 'sleep 986'"
+sleep 2
+check  "a remote process is running" ex s1 "pgrep -f '[s]leep 986'"
+ex s1 "pkill -INT -x varco"
+sleep 3
+refuse "leaving ends remote processes" ex s1 "pgrep -f '[s]leep 986'"
 
 echo "== secrets stay out of logs"
 SECRET_VALUE=$(secret "$OUT_A")

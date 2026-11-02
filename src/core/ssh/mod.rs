@@ -1,5 +1,7 @@
 //! Built-in SSH server for remote debugging. Off by default on every start,
 //! listens only on the mesh address, and accepts exactly one public key.
+//! Connections come from the system's sockets, or from the in-process stack on
+//! a machine running without a virtual NIC.
 #[cfg(windows)]
 mod firewall;
 mod process;
@@ -8,6 +10,7 @@ mod sftp;
 pub mod store;
 
 use super::engine::Status;
+use super::netstack::{MeshEndpoint, MeshListener};
 use anyhow::Result;
 use ipnet::Ipv4Net;
 use russh::keys::{PrivateKey, PublicKey};
@@ -17,13 +20,14 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio::runtime::Handle;
 use tokio::sync::{watch, Semaphore};
 use tracing::{debug, info, warn};
 
 pub const PORT: u16 = 2222;
-const MAX_CONNECTIONS: usize = 8;
+pub(crate) const MAX_CONNECTIONS: usize = 8;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// A polite goodbye may have nowhere to go if the network has already gone.
 const DISCONNECT_WAIT: Duration = Duration::from_secs(2);
@@ -52,6 +56,50 @@ pub enum SshState {
     Error(String),
 }
 
+/// Where connections come from, decided by how this machine joined the mesh.
+#[derive(Clone)]
+pub enum ListenSource {
+    /// A system socket on the virtual NIC's address.
+    Os,
+    /// The in-process stack, published each time it starts.
+    Mesh(watch::Receiver<Option<MeshEndpoint>>),
+}
+
+pub enum SshListener {
+    Os(TcpListener),
+    Mesh(MeshListener),
+}
+
+impl From<TcpListener> for SshListener {
+    fn from(listener: TcpListener) -> Self {
+        Self::Os(listener)
+    }
+}
+
+impl From<MeshListener> for SshListener {
+    fn from(listener: MeshListener) -> Self {
+        Self::Mesh(listener)
+    }
+}
+
+trait SshStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> SshStream for T {}
+
+impl SshListener {
+    async fn accept(&self) -> std::io::Result<(Box<dyn SshStream>, SocketAddr)> {
+        match self {
+            Self::Os(listener) => {
+                let (stream, peer) = listener.accept().await?;
+                Ok((Box::new(stream), peer))
+            }
+            Self::Mesh(listener) => {
+                let (stream, peer) = listener.accept().await?;
+                Ok((Box::new(stream), peer))
+            }
+        }
+    }
+}
+
 pub struct SshService {
     pub state: watch::Receiver<SshState>,
     pub host_fingerprint: String,
@@ -66,6 +114,7 @@ impl SshService {
         allowed: PublicKey,
         host_key: PrivateKey,
         net: watch::Receiver<Status>,
+        source: ListenSource,
     ) -> Self {
         let host_fingerprint = store::fingerprint(host_key.public_key());
         let (state_tx, state) = watch::channel(SshState::Starting);
@@ -73,6 +122,7 @@ impl SshService {
         let config = Arc::new(server::config(host_key));
         let task = runtime.spawn(follow_mesh(
             net,
+            source,
             Arc::new(allowed),
             config,
             state_tx,
@@ -95,6 +145,7 @@ impl SshService {
 
 async fn follow_mesh(
     mut net: watch::Receiver<Status>,
+    mut source: ListenSource,
     allowed: Arc<PublicKey>,
     config: Arc<russh::server::Config>,
     state: watch::Sender<SshState>,
@@ -115,15 +166,25 @@ async fn follow_mesh(
             continue;
         };
 
-        let Some(listener) = bind_with_retry(ip, &state, &mut net, &mut stop).await else {
+        let listener = match &mut source {
+            ListenSource::Os => bind_with_retry(ip, &state, &mut net, &mut stop)
+                .await
+                .map(SshListener::from),
+            ListenSource::Mesh(endpoint) => wait_for_endpoint(ip, endpoint, &mut net, &mut stop)
+                .await
+                .map(SshListener::from),
+        };
+        let Some(listener) = listener else {
             if *stop.borrow() {
                 break;
             }
             continue;
         };
         info!(%ip, port = PORT, "ssh server listening");
+        // The in-process stack has no system socket for a firewall to govern.
         #[cfg(windows)]
-        let _firewall = firewall::FirewallRule::open(ip, cidr, PORT);
+        let _firewall = matches!(source, ListenSource::Os)
+            .then(|| firewall::FirewallRule::open(ip, cidr, PORT));
 
         // Ends all sessions with it when the address changes or on stop.
         let (session_stop, session_stop_rx) = watch::channel(false);
@@ -150,6 +211,8 @@ async fn follow_mesh(
                 }
                 _ = stop.changed() => break true,
                 _ = &mut serving => break false,
+                // A new stack means the listener being served has gone.
+                _ = endpoint_replaced(&mut source) => break false,
             }
         };
         let _ = session_stop.send(true);
@@ -159,6 +222,51 @@ async fn follow_mesh(
         }
     }
     state.send_replace(SshState::Off);
+}
+
+/// Waits for the stack serving `ip`. It is published before the address shows
+/// up in the status, so it may already be there.
+async fn wait_for_endpoint(
+    ip: Ipv4Addr,
+    endpoint: &mut watch::Receiver<Option<MeshEndpoint>>,
+    net: &mut watch::Receiver<Status>,
+    stop: &mut watch::Receiver<bool>,
+) -> Option<MeshListener> {
+    loop {
+        if let Some(current) = endpoint.borrow_and_update().as_ref() {
+            if current.ip == ip {
+                return Some(current.listener.clone());
+            }
+        }
+        tokio::select! {
+            changed = endpoint.changed() => {
+                if changed.is_err() {
+                    // The connection has ended; only stopping is left.
+                    let _ = stop.changed().await;
+                    return None;
+                }
+            }
+            changed = net.changed() => {
+                if changed.is_err() {
+                    let _ = stop.changed().await;
+                    return None;
+                }
+                if net.borrow().net.as_ref().map(|n| n.ip) != Some(ip) {
+                    return None;
+                }
+            }
+            _ = stop.changed() => return None,
+        }
+    }
+}
+
+async fn endpoint_replaced(source: &mut ListenSource) {
+    if let ListenSource::Mesh(endpoint) = source {
+        if endpoint.changed().await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending().await
 }
 
 async fn bind_with_retry(
@@ -197,7 +305,7 @@ async fn bind_with_retry(
 
 /// Accepts until `stop`, then disconnects everyone before returning.
 pub async fn serve(
-    listener: TcpListener,
+    listener: impl Into<SshListener>,
     cidr: Ipv4Net,
     allowed: Arc<PublicKey>,
     config: Arc<russh::server::Config>,
@@ -205,6 +313,7 @@ pub async fn serve(
     ip: Ipv4Addr,
     mut stop: watch::Receiver<bool>,
 ) {
+    let listener = listener.into();
     state.send_replace(SshState::Listening { ip, connections: 0 });
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut sessions = tokio::task::JoinSet::new();
@@ -271,7 +380,7 @@ impl Drop for LoginCount {
 }
 
 async fn run_connection(
-    stream: TcpStream,
+    stream: Box<dyn SshStream>,
     peer: SocketAddr,
     config: Arc<russh::server::Config>,
     allowed: Arc<PublicKey>,

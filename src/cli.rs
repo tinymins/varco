@@ -54,7 +54,20 @@ fn describe(status: &Status) -> Option<String> {
     }
 }
 
-pub async fn run() -> Result<std::process::ExitCode> {
+pub async fn run(ssh_only: bool) -> Result<std::process::ExitCode> {
+    // Without SSH this mode would join the mesh and offer nothing, so it does not start.
+    let ssh_key = std::env::var(SSH_PUBKEY_ENV);
+    if ssh_only {
+        let problem = match &ssh_key {
+            Ok(key) => ssh::prepare(key).err().map(|error| error.to_string()),
+            Err(_) => Some(format!("需要设置 {SSH_PUBKEY_ENV}")),
+        };
+        if let Some(problem) = problem {
+            println!("失败：仅 SSH 模式无法开启（{problem}）");
+            wait_for_key_if_interactive();
+            return Ok(std::process::ExitCode::FAILURE);
+        }
+    }
     let credential = match Credential::parse(&read_code()?) {
         Ok(credential) => credential,
         Err(_) => {
@@ -63,20 +76,23 @@ pub async fn run() -> Result<std::process::ExitCode> {
             return Ok(std::process::ExitCode::FAILURE);
         }
     };
+    let runtime = tokio::runtime::Handle::current();
     // The CLI always runs in-process: its user can see and answer `sudo` themselves.
-    let connection = backend::start_in_process(&tokio::runtime::Handle::current(), credential);
+    let connection = if ssh_only {
+        println!("仅 SSH 模式：不创建网卡，这台电脑不能访问其他成员");
+        backend::start_ssh_only(&runtime, credential)
+    } else {
+        backend::start_in_process(&runtime, credential)
+    };
     let mut status_rx = connection.status.clone();
     let stop_tx = connection.stop;
+    let ssh_source = connection.ssh_source;
 
-    let mut ssh_service = match std::env::var(SSH_PUBKEY_ENV) {
+    let mut ssh_service = match ssh_key {
         Ok(key) => match ssh::prepare(&key) {
             Ok((allowed, host_key)) => {
-                let service = SshService::start(
-                    &tokio::runtime::Handle::current(),
-                    allowed,
-                    host_key,
-                    status_rx.clone(),
-                );
+                let service =
+                    SshService::start(&runtime, allowed, host_key, status_rx.clone(), ssh_source);
                 println!("SSH 主机指纹：{}", service.host_fingerprint);
                 Some(service)
             }

@@ -1,4 +1,4 @@
-import { Button, LineEdit, AboutSlint, ScrollView, Switch } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, AboutSlint, ScrollView, Switch } from "std-widgets.slint";
 import "../assets/fonts/NotoSansSC-Subset.otf";
 
 export struct MemberRow { hostname: string, ip: string, is-self: bool }
@@ -38,6 +38,8 @@ export component App inherits Window {
     in property <[MemberRow]> members;
     in-out property <string> code;
 
+    // Join without a virtual NIC. Not remembered: it is a remedy, not a preference.
+    in-out property <bool> ssh-only;
     // SSH server. Off on every start: only the key is remembered.
     in-out property <bool> ssh-on;
     in-out property <string> ssh-pubkey;
@@ -88,6 +90,11 @@ export component App inherits Window {
             text <=> root.code;
             accepted => { root.confirm(root.code); }
         }
+        CheckBox {
+            text: "仅 SSH，不创建网卡";
+            enabled: !root.busy;
+            checked <=> root.ssh-only;
+        }
         Button {
             text: root.busy ? "连接中…" : "确认";
             primary: true;
@@ -107,6 +114,7 @@ export component App inherits Window {
         padding-top: 30px;
         spacing: 8px;
         Text { text: "● " + root.status-text; color: root.status-color; font-size: 16px; font-weight: 600; wrap: word-wrap; }
+        if root.ssh-only: Text { text: "仅 SSH 模式：这台电脑不能访问其他成员"; color: #666; font-size: 12px; wrap: word-wrap; }
         ScrollView {
             vertical-stretch: 1;
             min-height: 120px;

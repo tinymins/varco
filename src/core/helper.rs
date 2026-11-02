@@ -6,6 +6,7 @@
 use super::backend::{hostname, Connection};
 use super::engine::{self, Counters, DeviceFactory, Phase, Status};
 use super::error::FailReason;
+use super::ssh::ListenSource;
 use crate::credential::Credential;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
@@ -49,6 +50,7 @@ pub fn start_elevated(runtime: &Handle, credential: Credential) -> Connection {
         status,
         counters,
         stop,
+        ssh_source: ListenSource::Os,
     }
 }
 

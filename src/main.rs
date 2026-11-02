@@ -16,6 +16,9 @@ struct Args {
     /// 使用命令行而不是窗口
     #[arg(long)]
     cli: bool,
+    /// 不创建虚拟网卡，只通过组网提供 SSH（命令行模式，需要 VARCO_SSH_PUBKEY）
+    #[arg(long)]
+    ssh_only: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -71,7 +74,11 @@ fn use_console() {
 #[cfg(not(all(windows, feature = "gui")))]
 fn use_console() {}
 
-fn run_client(runtime: &tokio::runtime::Runtime, force_cli: bool) -> Result<ExitCode> {
+fn run_client(
+    runtime: &tokio::runtime::Runtime,
+    force_cli: bool,
+    ssh_only: bool,
+) -> Result<ExitCode> {
     #[cfg(feature = "gui")]
     if !force_cli && std::env::var_os(cli::CREDENTIAL_ENV).is_none() {
         match gui::run(runtime.handle().clone()) {
@@ -86,7 +93,7 @@ fn run_client(runtime: &tokio::runtime::Runtime, force_cli: bool) -> Result<Exit
     }
     #[cfg(not(feature = "gui"))]
     let _ = force_cli;
-    runtime.block_on(cli::run())
+    runtime.block_on(cli::run(ssh_only))
 }
 
 fn main() -> Result<ExitCode> {
@@ -99,7 +106,7 @@ fn main() -> Result<ExitCode> {
     // Built by hand because a GUI event loop has to own the main thread.
     let runtime = tokio::runtime::Runtime::new()?;
     match args.command {
-        None => run_client(&runtime, args.cli),
+        None => run_client(&runtime, args.cli || args.ssh_only, args.ssh_only),
         Some(Command::Server {
             config,
             action: None,
