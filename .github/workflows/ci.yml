@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: check-${{ hashFiles('Cargo.lock') }}
+          restore-keys: check-
+      - run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --features gui -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: test-${{ runner.os }}-
+      - run: rustup update stable && rustup default stable
+      - run: cargo test --locked
+      # Also proves the window front end and platform-specific code compile.
+      - run: cargo build --locked --features gui
+
+  e2e:
+    name: end-to-end (real TUN devices)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/e2e/run.sh

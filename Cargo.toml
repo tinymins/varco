@@ -1,0 +1,49 @@
+[package]
+name = "varco"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+gui = ["dep:slint", "dep:slint-build"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+bytes = "1"
+gethostname = "1"
+clap = { version = "4", features = ["derive"] }
+ipnet = { version = "2", features = ["serde"] }
+rand = "0.9"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+socket2 = "0.6"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "io-std", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tun-rs = { version = "2.8", features = ["async_tokio"] }
+slint = { version = "1.18", optional = true, default-features = false, features = ["std", "compat-1-18", "backend-winit", "renderer-winit-software"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[build-dependencies]
+slint-build = { version = "1.18", optional = true }
+embed-manifest = "1"
+
+[profile.release]
+lto = "thin"
+strip = true
+panic = "abort"

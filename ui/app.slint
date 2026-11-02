@@ -1,0 +1,142 @@
+import { Button, LineEdit, AboutSlint, ScrollView } from "std-widgets.slint";
+import "../assets/fonts/NotoSansSC-Subset.otf";
+
+export struct MemberRow { hostname: string, ip: string, is-self: bool }
+
+component Row {
+    in property <string> label;
+    in property <string> value;
+    HorizontalLayout {
+        spacing: 12px;
+        Text { text: root.label; width: 44px; color: #666; }
+        Text { text: root.value; horizontal-stretch: 1; overflow: elide; }
+    }
+}
+
+export component App inherits Window {
+    title: "varco";
+    preferred-width: 400px;
+    min-width: 340px;
+    preferred-height: 440px;
+    min-height: 300px;
+    default-font-family: "Noto Sans SC";
+    default-font-size: 14px;
+    background: #fafafa;
+
+    // Which screen: false is the code entry, true is the joined network.
+    in property <bool> joined;
+    in property <bool> busy;
+    in property <string> status-text;
+    in property <color> status-color: #1a7f37;
+    in property <string> error-text;
+    in property <string> network;
+    in property <string> ip;
+    in property <string> cidr;
+    in property <string> latency;
+    in property <string> upload;
+    in property <string> download;
+    in property <[MemberRow]> members;
+    in-out property <string> code;
+
+    callback confirm(string);
+    callback disconnect();
+
+    property <bool> show-about;
+    property <bool> copied;
+
+    copied-timer := Timer {
+        interval: 1500ms;
+        running: root.copied;
+        triggered => { root.copied = false; }
+    }
+
+    // Slint has no clipboard API; this hidden input provides one.
+    clipboard := TextInput {
+        visible: false;
+        width: 0; height: 0;
+        text: root.ip;
+    }
+
+    if !root.joined && !root.show-about: VerticalLayout {
+        padding: 24px;
+        spacing: 12px;
+        alignment: center;
+        Text { text: "加入组网"; font-size: 20px; font-weight: 600; }
+        Text { text: "请粘贴收到的 Code"; color: #666; }
+        code-input := LineEdit {
+            placeholder-text: "varco1.…";
+            enabled: !root.busy;
+            text <=> root.code;
+            accepted => { root.confirm(root.code); }
+        }
+        Button {
+            text: root.busy ? "连接中…" : "确认";
+            primary: true;
+            enabled: !root.busy && root.code != "";
+            clicked => { root.confirm(root.code); }
+        }
+        if root.error-text != "": Text {
+            text: "✗ " + root.error-text;
+            color: #b42318;
+            wrap: word-wrap;
+        }
+    }
+
+    if root.joined && !root.show-about: VerticalLayout {
+        padding: 20px;
+        // Leaves the top right corner to the About link, however long the status gets.
+        padding-top: 30px;
+        spacing: 8px;
+        Text { text: "● " + root.status-text; color: root.status-color; font-size: 16px; font-weight: 600; wrap: word-wrap; }
+        Row { label: "网络"; value: root.network; }
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: "本机IP"; width: 44px; color: #666; vertical-alignment: center; }
+            Text { text: root.ip; font-weight: 600; vertical-alignment: center; }
+            Button {
+                text: root.copied ? "已复制" : "复制";
+                clicked => {
+                    clipboard.select-all();
+                    clipboard.copy();
+                    root.copied = true;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Row { label: "网段"; value: root.cidr; }
+        Row { label: "延迟"; value: root.latency; }
+        Row { label: "上行"; value: root.upload; }
+        Row { label: "下行"; value: root.download; }
+        Text { text: "在线成员"; color: #666; }
+        ScrollView {
+            vertical-stretch: 1;
+            min-height: 60px;
+            VerticalLayout {
+                alignment: start;
+                spacing: 4px;
+                for member in root.members: Row {
+                    label: member.is-self ? "本机" : "";
+                    value: member.ip + "   " + member.hostname;
+                }
+            }
+        }
+        Button { text: "断开"; clicked => { root.disconnect(); } }
+    }
+
+    if root.show-about: VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+        alignment: center;
+        AboutSlint { }
+        Button { text: "返回"; clicked => { root.show-about = false; } }
+    }
+
+    if !root.show-about: TouchArea {
+        x: root.width - 52px;
+        y: 6px;
+        width: 44px;
+        height: 24px;
+        clicked => { root.show-about = true; }
+        Text { text: "关于"; color: #888; font-size: 12px; }
+    }
+}

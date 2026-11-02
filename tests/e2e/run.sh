@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# End-to-end test with real TUN devices: one server, four clients, two networks.
+# Needs only Docker. Usage: tests/e2e/run.sh
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+
+NET=varco-e2e; IMG=varco-e2e; VOL=varco-e2e-target; PORT=8443
+NODES=(srv a1 a2 a3 b1)
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }
+bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
+check() { local name=$1; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
+refuse() { local name=$1; shift; if "$@" >/dev/null 2>&1; then bad "$name"; else ok "$name"; fi; }
+ex() { docker exec "varco-$1" bash -c "$2"; }
+
+cleanup() {
+  for n in "${NODES[@]}"; do docker rm -f "varco-$n" >/dev/null 2>&1; done
+  docker network rm "$NET" >/dev/null 2>&1
+}
+trap cleanup EXIT
+cleanup
+
+docker build -q -t "$IMG" tests/e2e >/dev/null || exit 2
+docker volume create "$VOL" >/dev/null
+echo "== build"
+docker run --rm -v "$PWD:/src:ro" -v "$VOL:/target" -w /src -e CARGO_TARGET_DIR=/target "$IMG" \
+  cargo build --locked --bin varco 2>&1 | tail -1
+[ "${PIPESTATUS[0]}" = 0 ] || exit 2
+
+docker network create "$NET" >/dev/null
+for n in "${NODES[@]}"; do
+  docker run -d --name "varco-$n" --hostname "$n" --network "$NET" \
+    --cap-add NET_ADMIN --device /dev/net/tun -v "$VOL:/target:ro" \
+    "$IMG" sleep infinity >/dev/null
+done
+docker exec -i varco-srv bash -c 'mkdir -p /etc/varco && cat > /etc/varco/config.toml' <<CFG
+listen = "0.0.0.0:$PORT"
+public_addr = "varco-srv:$PORT"
+[[network]]
+name = "a"
+cidr = "10.77.1.0/24"
+[[network]]
+name = "b"
+cidr = "10.77.2.0/24"
+CFG
+
+BIN=/target/debug/varco
+gen() { ex srv "$BIN server gen-credential --network $1"; }
+OUT_A=$(gen a); OUT_B=$(gen b)
+secret() { echo "$1" | sed -n 2p | tr -d ' "'; }
+code()   { echo "$1" | sed -n 4p | tr -d ' '; }
+CODE_A=$(code "$OUT_A"); CODE_B=$(code "$OUT_B")
+ex srv "sed -i '/name = \"a\"/a credentials = [\"$(secret "$OUT_A")\"]' /etc/varco/config.toml
+        sed -i '/name = \"b\"/a credentials = [\"$(secret "$OUT_B")\"]' /etc/varco/config.toml"
+
+start_server() { docker exec -d varco-srv bash -c "$BIN server -c /etc/varco/config.toml >>/tmp/server.log 2>&1"; }
+stop_server()  { ex srv "pkill -x varco"; }
+join() { docker exec -d -e "VARCO_CREDENTIAL=$2" "varco-$1" bash -c "$BIN >>/tmp/client.log 2>&1"; }
+mesh_ip() { ex "$1" "ip -4 -o addr | awk '\$2!=\"lo\" && \$2!=\"eth0\" {print \$4}' | cut -d/ -f1 | head -1"; }
+wait_ip() { for _ in $(seq 60); do local ip; ip=$(mesh_ip "$1"); [ -n "$ip" ] && { echo "$ip"; return 0; }; sleep 0.5; done; return 1; }
+ping1() { ex "$1" "ping -c1 -W2 $2"; }
+wait_ping() { for _ in $(seq "${3:-60}"); do ping1 "$1" "$2" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+
+start_server; sleep 1
+echo "== join"
+join a1 "$CODE_A"; join a2 "$CODE_A"; join a3 "$CODE_A"; join b1 "$CODE_B"
+IP_A1=$(wait_ip a1); IP_A2=$(wait_ip a2); IP_A3=$(wait_ip a3); IP_B1=$(wait_ip b1)
+echo "  a1=$IP_A1 a2=$IP_A2 a3=$IP_A3 b1=$IP_B1"
+[ -n "$IP_A1" ] && [ -n "$IP_A2" ] && [ -n "$IP_A3" ] && [ -n "$IP_B1" ] || { ex a1 'cat /tmp/client.log'; ex srv 'cat /tmp/server.log'; exit 1; }
+
+echo "== reachability"
+check  "a1 -> a2 same network"           wait_ping a1 "$IP_A2" 10
+check  "a2 -> a1 same network"           ping1 a2 "$IP_A1"
+refuse "a1 -> b1 across networks"        ping1 a1 "$IP_B1"
+refuse "b1 -> a1 across networks"        ping1 b1 "$IP_A1"
+refuse "a1 -> unassigned host in subnet" ping1 a1 10.77.1.200
+
+echo "== nothing beyond the mesh"
+ROUTES=$(ex a1 "ip route")
+check  "default route still via eth0" bash -c "echo '$ROUTES' | grep -q '^default .* dev eth0'"
+TUN_DEV=$(ex a1 "ip -4 -o addr | awk '\$2!=\"lo\" && \$2!=\"eth0\" {print \$2}' | head -1")
+check  "only the mesh subnet uses the TUN" bash -c "[ \"\$(echo '$ROUTES' | grep -c 'dev $TUN_DEV')\" = 1 ] && echo '$ROUTES' | grep -q '^10.77.1.0/24 .*dev $TUN_DEV'"
+SRV_ETH=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' varco-srv)
+refuse "server has no TUN or mesh address" ex srv "ip -4 -o addr | grep -q 10.77"
+# Force traffic for the server and the Internet into the TUN, as a hostile client would.
+ex a1 "ip route add 8.8.8.8/32 dev $TUN_DEV; ip route add $SRV_ETH/32 dev $TUN_DEV"
+refuse "forced via TUN: Internet unreachable" ping1 a1 8.8.8.8
+refuse "forced via TUN: server unreachable"   ping1 a1 "$SRV_ETH"
+ex a1 "ip route del 8.8.8.8/32; ip route del $SRV_ETH/32"
+
+echo "== rejected joins (run in b1 as a one-off process, which must exit by itself)"
+attempt() { docker exec -e "VARCO_CREDENTIAL=$1" varco-b1 timeout 20 "$BIN" 2>&1; }
+expect_msg() { local name=$1 code=$2 pattern=$3; local out; out=$(attempt "$code"); local rc=$?
+  if [ "$rc" = 1 ] && echo "$out" | grep -q "$pattern"; then ok "$name"; else bad "$name (rc=$rc: $out)"; fi; }
+# Issued for network a but never added to the config.
+UNLISTED=$(code "$(gen a)")
+expect_msg "unlisted secret is rejected"   "$UNLISTED" "无效或已被撤销"
+expect_msg "malformed code is rejected"    "garbage"   "格式不正确"
+# A different server key gives a valid code whose pin does not match this server.
+ex srv "mkdir -p /tmp/other && cp /etc/varco/config.toml /tmp/other/config.toml"
+WRONG_PIN=$(code "$(ex srv "$BIN server -c /tmp/other/config.toml gen-credential --network a")")
+expect_msg "wrong pin (simulated MITM) is rejected" "$WRONG_PIN" "证书与 Code 不符"
+REFUSED=$(ex srv "grep -c 'connection rejected' /tmp/server.log")
+[ "$REFUSED" = 1 ] && ok "only the unlisted secret reached the server's auth step" \
+                   || bad "expected 1 auth rejection, got $REFUSED"
+
+echo "== inner TCP survives a 60 s outage"
+ex a1 "head -c 12000000 /dev/urandom > /tmp/blob; sha256sum < /tmp/blob > /tmp/blob.sum"
+docker exec -d varco-a2 bash -c "nc -l -p 9000 > /tmp/recv"
+sleep 1
+# 100 kB/s, so the transfer spans the whole outage.
+docker exec -d varco-a1 bash -c "pv -q -L 100k /tmp/blob | nc -N $IP_A2 9000; touch /tmp/sent"
+sleep 10
+ex a1 "iptables -A OUTPUT -p tcp --dport $PORT -j DROP"
+sleep 60
+SENT_BEFORE=$(ex a2 "stat -c %s /tmp/recv")
+ex a1 "iptables -D OUTPUT -p tcp --dport $PORT -j DROP"
+check  "client log shows it noticed the outage" ex a1 "grep -q '重连\|session ended' /tmp/client.log"
+check  "a1 rejoined after the outage"      wait_ping a1 "$IP_A2" 60
+check  "a1 kept its address"               ex a1 "ip -4 -o addr | grep -q ' $IP_A1/'"
+for _ in $(seq 400); do ex a1 "test -f /tmp/sent" 2>/dev/null && break; sleep 1; done
+sleep 2
+if [ "$(ex a2 'sha256sum < /tmp/recv')" = "$(ex a1 'cat /tmp/blob.sum')" ]; then
+  ok "12 MB transfer intact across the outage (paused at $SENT_BEFORE bytes)"
+else
+  bad "transfer corrupted or incomplete: $(ex a2 'stat -c %s /tmp/recv') of 12000000 bytes"
+fi
+
+echo "== server restart"
+stop_server; sleep 2; start_server
+check  "a1 -> a2 after restart"            wait_ping a1 "$IP_A2" 60
+check  "a1 address unchanged"              ex a1 "ip -4 -o addr | grep -q ' $IP_A1/'"
+check  "a2 address unchanged"              ex a2 "ip -4 -o addr | grep -q ' $IP_A2/'"
+refuse "code still valid after restart (key kept)" ex a1 "grep -q '无效或已被撤销' /tmp/client.log"
+
+echo "== a stuck client does not affect others"
+ex a2 "pkill -STOP -x varco"
+# Keep sending to the frozen member so its queue on the server is full.
+docker exec -d varco-a1 bash -c "timeout 20 ping -i 0.01 -s 1000 $IP_A2 >/dev/null 2>&1"
+sleep 5
+check  "a1 -> a3 works while a2 is frozen and flooded" ping1 a1 "$IP_A3"
+check  "a3 -> a1 works while a2 is frozen and flooded" ping1 a3 "$IP_A1"
+sleep 16
+ex a2 "pkill -CONT -x varco"
+check  "a2 recovers after being resumed"   wait_ping a2 "$IP_A1" 90
+check  "a2 address unchanged"              ex a2 "ip -4 -o addr | grep -q ' $IP_A2/'"
+
+echo "== 5% packet loss on the outer link"
+if ex a1 "tc qdisc add dev eth0 root netem loss 5%" 2>/dev/null; then
+  ex a1 "head -c 2000000 /dev/urandom > /tmp/blob2; sha256sum < /tmp/blob2 > /tmp/blob2.sum; rm -f /tmp/sent2"
+  docker exec -d varco-a3 bash -c "nc -l -p 9001 > /tmp/recv2"
+  sleep 1
+  docker exec -d varco-a1 bash -c "nc -N $IP_A3 9001 < /tmp/blob2; touch /tmp/sent2"
+  for _ in $(seq 180); do ex a1 "test -f /tmp/sent2" 2>/dev/null && break; sleep 1; done
+  sleep 2
+  ex a1 "tc qdisc del dev eth0 root"
+  if [ "$(ex a3 'sha256sum < /tmp/recv2')" = "$(ex a1 'cat /tmp/blob2.sum')" ]; then
+    ok "2 MB transfer intact under 5% loss"
+  else
+    bad "transfer under loss incomplete: $(ex a3 'stat -c %s /tmp/recv2') of 2000000 bytes"
+  fi
+else
+  echo "  SKIP  netem not available in this kernel"
+fi
+
+echo "== secrets stay out of logs"
+SECRET_VALUE=$(secret "$OUT_A")
+refuse "secret absent from server log" ex srv "grep -qF '$SECRET_VALUE' /tmp/server.log"
+refuse "secret absent from client log" ex a1  "grep -qF '$SECRET_VALUE' /tmp/client.log"
+
+echo
+echo "server log excerpt:"; ex srv "tail -5 /tmp/server.log"
+echo "passed $PASS, failed $FAIL"
+[ "$FAIL" = 0 ]

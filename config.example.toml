@@ -1,0 +1,14 @@
+# 复制为 config.toml 后修改。真实配置含凭证，已被 .gitignore 排除，不要提交。
+
+# 服务端监听地址。
+listen = "0.0.0.0:8443"
+
+# 客户端连接的地址，IP 或域名加端口都可以，会写入生成的 Code。
+# 改动后要重新生成并分发 Code，已发出的 Code 仍指向旧地址。
+public_addr = "vpn.example.com:8443"
+
+# 每个客户一个 network，不同 network 之间不通。
+[[network]]
+name = "customer-a"
+cidr = "10.77.1.0/24"   # 掩码范围 /20 到 /30
+credentials = []        # 用 `varco server gen-credential --network customer-a` 生成
