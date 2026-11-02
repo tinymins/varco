@@ -3,17 +3,16 @@ use anyhow::Result;
 use std::io::{IsTerminal, Write};
 use varco::core::backend;
 use varco::core::engine::{Phase, Status};
-use varco::core::error::FailReason;
 use varco::core::ssh::{self, SshService, SshState};
-use varco::credential::Credential;
+use varco::launch::Launch;
 
 pub const CREDENTIAL_ENV: &str = "VARCO_CREDENTIAL";
 /// Setting this turns the SSH server on, for machines with no window to click.
 pub const SSH_PUBKEY_ENV: &str = "VARCO_SSH_PUBKEY";
 
-fn read_code() -> Result<String> {
-    if let Ok(code) = std::env::var(CREDENTIAL_ENV) {
-        return Ok(code);
+fn read_code(configured: Option<&str>) -> Result<String> {
+    if let Some(code) = configured {
+        return Ok(code.to_owned());
     }
     print!("请输入 Code: ");
     std::io::stdout().flush()?;
@@ -54,27 +53,34 @@ fn describe(status: &Status) -> Option<String> {
     }
 }
 
-pub async fn run(ssh_only: bool) -> Result<std::process::ExitCode> {
-    // Without SSH this mode would join the mesh and offer nothing, so it does not start.
-    let ssh_key = std::env::var(SSH_PUBKEY_ENV);
-    if ssh_only {
-        let problem = match &ssh_key {
-            Ok(key) => ssh::prepare(key).err().map(|error| error.to_string()),
-            Err(_) => Some(format!("需要设置 {SSH_PUBKEY_ENV}")),
-        };
-        if let Some(problem) = problem {
-            println!("失败：仅 SSH 模式无法开启（{problem}）");
-            wait_for_key_if_interactive();
-            return Ok(std::process::ExitCode::FAILURE);
-        }
+fn fail(message: &str) -> std::process::ExitCode {
+    println!("失败：{message}");
+    wait_for_key_if_interactive();
+    std::process::ExitCode::FAILURE
+}
+
+pub async fn run(launch: Launch) -> Result<std::process::ExitCode> {
+    if let Some(problem) = &launch.problem {
+        return Ok(fail(problem));
     }
-    let credential = match Credential::parse(&read_code()?) {
+    let ssh_only = launch.ssh_only;
+    // Checked before joining: a key that was asked for and cannot work should
+    // not leave a connection up that nobody can reach.
+    let ssh_keys = match &launch.ssh_pubkey {
+        Some(key) => match ssh::prepare(key) {
+            Ok(keys) => Some(keys),
+            Err(error) => return Ok(fail(&format!("SSH 无法开启（{error}）"))),
+        },
+        None => None,
+    };
+    if ssh_only && ssh_keys.is_none() {
+        return Ok(fail(&format!(
+            "仅 SSH 模式需要公钥（--ssh-pubkey、配置文件或 {SSH_PUBKEY_ENV}）"
+        )));
+    }
+    let credential = match launch.credential(&read_code(launch.code.as_deref())?) {
         Ok(credential) => credential,
-        Err(_) => {
-            println!("失败：{}", FailReason::BadCredential);
-            wait_for_key_if_interactive();
-            return Ok(std::process::ExitCode::FAILURE);
-        }
+        Err(message) => return Ok(fail(&message)),
     };
     let runtime = tokio::runtime::Handle::current();
     // The CLI always runs in-process: its user can see and answer `sudo` themselves.
@@ -88,21 +94,11 @@ pub async fn run(ssh_only: bool) -> Result<std::process::ExitCode> {
     let stop_tx = connection.stop;
     let ssh_source = connection.ssh_source;
 
-    let mut ssh_service = match ssh_key {
-        Ok(key) => match ssh::prepare(&key) {
-            Ok((allowed, host_key)) => {
-                let service =
-                    SshService::start(&runtime, allowed, host_key, status_rx.clone(), ssh_source);
-                println!("SSH 主机指纹：{}", service.host_fingerprint);
-                Some(service)
-            }
-            Err(error) => {
-                println!("SSH 未开启：{error}");
-                None
-            }
-        },
-        Err(_) => None,
-    };
+    let mut ssh_service = ssh_keys.map(|(allowed, host_key)| {
+        let service = SshService::start(&runtime, allowed, host_key, status_rx.clone(), ssh_source);
+        println!("SSH 主机指纹：{}", service.host_fingerprint);
+        service
+    });
     let mut ssh_state = ssh_service.as_ref().map(|service| service.state.clone());
     let mut last_ssh = None;
 

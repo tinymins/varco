@@ -36,6 +36,8 @@
 | Linux 桌面 | `chmod +x` 后运行，点确认后通过 pkexec 授权 |
 | Linux 无界面 | `sudo varco --cli`，或 `sudo VARCO_CREDENTIAL=<Code> varco` 用于无人值守 |
 
+程序本身不含任何服务器地址，要连哪台服务器完全由 Code 决定。
+
 程序没有正式代码签名，首次运行可能被系统拦截：
 
 - **Windows SmartScreen**：点“更多信息”，再点“仍要运行”。
@@ -84,6 +86,42 @@ VARCO_CREDENTIAL=<Code> VARCO_SSH_PUBKEY=<公钥> varco --ssh-only
 - **只有 SSH**：组网流量由程序自己处理，只接受 TCP 2222，这台电脑本机的其他端口不会暴露；`ssh -L` 仍可转发到它的 `127.0.0.1`。
 - **不能主动访问**：这台电脑不能访问其他成员。
 - **其他规则相同**：公钥、会话随退出结束等都和上面一样。Windows 版程序仍会请求管理员权限，远程 shell 也仍是管理员。
+
+### 一键拉起
+
+把设置放在程序旁边，或者写进一个 `.cmd`，对方双击就能连上，不用再粘贴。
+
+**配置文件**放在程序同目录，与程序同名，例如 `varco-windows-x64.exe` 对应 `varco-windows-x64.toml`：
+
+```toml
+code = "varco1.…"                          # 必填才会自动加入
+ssh_pubkey = "ssh-ed25519 AAAA… me@host"   # 加入后自动开启 SSH
+# 以下可选
+server = "vpn.example.com"                 # 代替 Code 里的服务端地址
+port = 8443                                # 代替 Code 里的端口
+ssh_only = false                           # 默认：提供了公钥时为 true
+```
+
+**命令行**参数相同，放进 `.cmd` 就是一键启动：
+
+```bat
+@echo off
+"%~dp0varco-windows-x64.exe" --code "varco1.…" --ssh-pubkey "ssh-ed25519 AAAA… me@host"
+```
+
+- **优先级**：命令行 > 环境变量（`VARCO_CREDENTIAL`、`VARCO_SSH_PUBKEY`）> 配置文件。
+- **效果**：有 Code 就打开窗口并自动加入；再有公钥就同时开启 SSH，并默认用[仅 SSH 模式](#仅-ssh-模式)，不创建网卡。窗口始终可见，并显示可登录公钥的指纹，关闭窗口即断开。
+- **改地址是安全的**：`server` 和 `port` 只改变连接目标，证书指纹和密钥仍来自 Code。指向别的服务器只会连接失败，密钥不会发出。
+- **写错不会被忽略**：配置文件有错、公钥或 Code 无效时不会连接，并提示原因。
+- **公钥不会被记住**：这样传入的公钥不写入用户目录，删掉配置文件就不再有效。
+
+使用前请注意：
+
+- 配置文件和 `.cmd` 里的 Code 是明文密钥，要像 Code 一样保管。
+- 命令行参数能被本机其他进程看到，多人共用的电脑上请用配置文件。
+- 运行带公钥的包，等于把这台电脑的控制权交给私钥持有者。只发给知情并同意的人。
+
+macOS 的 `varco.app` 请把配置放在 `varco.app/Contents/MacOS/varco.toml`，或直接用命令行参数。
 
 ## 服务端
 

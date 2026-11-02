@@ -43,6 +43,34 @@ pub enum ParseError {
     Server,
 }
 
+fn server_is_valid(server: &str) -> bool {
+    server
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
+
+/// Bare IPv6 addresses gain the brackets a `host:port` needs. Anything else with a
+/// colon or a space is a mistake, such as a port written into the host setting.
+fn normalize_host(host: &str) -> Option<String> {
+    let host = host.trim();
+    if host.is_empty() || host.contains(|c: char| c.is_whitespace() || c == '/') {
+        return None;
+    }
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return inner
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|_| host.to_owned());
+    }
+    if host.contains(':') {
+        return host
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|_| format!("[{host}]"));
+    }
+    Some(host.to_owned())
+}
+
 fn checksum(body: &[u8]) -> [u8; CHECKSUM_LEN] {
     let digest = Sha256::digest(body);
     [digest[0], digest[1], digest[2], digest[3]]
@@ -73,10 +101,7 @@ impl Credential {
             return Err(ParseError::Checksum);
         }
         let server = std::str::from_utf8(&body[64..]).map_err(|_| ParseError::Server)?;
-        let port_ok = server
-            .rsplit_once(':')
-            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
-        if !port_ok {
+        if !server_is_valid(server) {
             return Err(ParseError::Server);
         }
         Ok(Self {
@@ -84,6 +109,31 @@ impl Credential {
             pin: body[..32].try_into().expect("length checked"),
             secret: body[32..64].try_into().expect("length checked"),
         })
+    }
+
+    /// Points at another address. The pin stays, so a wrong address can only fail
+    /// to connect: it can never be used to receive the secret.
+    pub fn with_address(
+        mut self,
+        host: Option<&str>,
+        port: Option<u16>,
+    ) -> Result<Self, ParseError> {
+        if port == Some(0) {
+            return Err(ParseError::Server);
+        }
+        let (current_host, current_port) =
+            self.server.rsplit_once(':').ok_or(ParseError::Server)?;
+        let host = match host {
+            Some(host) => normalize_host(host).ok_or(ParseError::Server)?,
+            None => current_host.to_owned(),
+        };
+        let port = port.map_or_else(|| current_port.to_owned(), |port| port.to_string());
+        let server = format!("{host}:{port}");
+        if !server_is_valid(&server) {
+            return Err(ParseError::Server);
+        }
+        self.server = server;
+        Ok(self)
     }
 }
 
@@ -115,6 +165,42 @@ mod tests {
             pin: [7; 32],
             secret: [9; 32],
         }
+    }
+
+    #[test]
+    fn address_can_be_replaced_in_part_or_whole() {
+        let moved = |host, port| sample().with_address(host, port).unwrap().server;
+        assert_eq!(moved(None, None), "203.0.113.7:8443");
+        assert_eq!(moved(Some("vpn.example.com"), None), "vpn.example.com:8443");
+        assert_eq!(moved(None, Some(9000)), "203.0.113.7:9000");
+        assert_eq!(moved(Some(" 10.0.0.1 "), Some(1)), "10.0.0.1:1");
+        assert_eq!(moved(Some("::1"), Some(1)), "[::1]:1");
+        assert_eq!(moved(Some("[::1]"), Some(1)), "[::1]:1");
+    }
+
+    #[test]
+    fn replacing_the_address_keeps_the_pin_and_secret() {
+        let moved = sample().with_address(Some("a.example"), Some(1)).unwrap();
+        assert_eq!(moved.pin, sample().pin);
+        assert_eq!(moved.secret, sample().secret);
+    }
+
+    #[test]
+    fn replacing_the_address_on_an_ipv6_code_keeps_it_whole() {
+        let credential = Credential {
+            server: "[2001:db8::1]:8443".into(),
+            ..sample()
+        };
+        let moved = credential.with_address(None, Some(9000)).unwrap();
+        assert_eq!(moved.server, "[2001:db8::1]:9000");
+    }
+
+    #[test]
+    fn bad_addresses_are_refused() {
+        for host in ["", "  ", "a b", "a/b", "host:8443", "[nope]", "1:2:3"] {
+            assert!(sample().with_address(Some(host), None).is_err(), "{host:?}");
+        }
+        assert!(sample().with_address(None, Some(0)).is_err());
     }
 
     #[test]

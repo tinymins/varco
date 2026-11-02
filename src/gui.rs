@@ -7,9 +7,8 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use varco::core::backend::{self, Connection};
 use varco::core::engine::{Phase, Status};
-use varco::core::error::FailReason;
 use varco::core::ssh::{self, store, SshService, SshState};
-use varco::credential::Credential;
+use varco::launch::Launch;
 
 slint::include_modules!();
 
@@ -101,6 +100,7 @@ fn turn_ssh_off(app: &App, runtime: &Handle, slot: &mut Option<SshService>) {
     app.set_ssh_status(SharedString::new());
     app.set_ssh_command(SharedString::new());
     app.set_ssh_fingerprint(SharedString::new());
+    app.set_ssh_configured_key(SharedString::new());
 }
 
 struct Session {
@@ -187,8 +187,52 @@ fn tick(app: &App, slot: &mut Option<Session>) {
     }
 }
 
+/// Whether the key in the field came with the package rather than from this window.
+fn is_configured_key(configured: Option<&str>, key: &str) -> bool {
+    configured.is_some_and(|configured| configured.trim() == key.trim())
+}
+
+/// A key that came with the package is only used, never remembered, so deleting
+/// the package's settings really does end its access.
+fn start_ssh(
+    app: &App,
+    runtime: &Handle,
+    connection: &Connection,
+    configured: Option<&str>,
+) -> Option<SshService> {
+    let key = app.get_ssh_pubkey();
+    let from_package = is_configured_key(configured, &key);
+    let saved = if from_package {
+        Ok(())
+    } else {
+        store::Store::open_default().and_then(|s| s.save_authorized_key(&key))
+    };
+    match saved.and_then(|()| ssh::prepare(&key)) {
+        Ok((allowed, host_key)) => {
+            let shown_key = from_package.then(|| store::fingerprint(&allowed));
+            let started = SshService::start(
+                runtime,
+                allowed,
+                host_key,
+                connection.status.clone(),
+                connection.ssh_source.clone(),
+            );
+            app.set_ssh_on(true);
+            app.set_ssh_fingerprint(started.host_fingerprint.as_str().into());
+            app.set_ssh_configured_key(shown_key.unwrap_or_default().into());
+            show_ssh(app, &started);
+            Some(started)
+        }
+        Err(error) => {
+            app.set_ssh_on(false);
+            app.set_ssh_key_error(error.to_string().into());
+            None
+        }
+    }
+}
+
 /// `Err` means no window could be created, and the caller falls back to the CLI.
-pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
+pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError> {
     // The software renderer is used everywhere: it needs no GPU, so remote
     // desktops and bare virtual machines behave the same as anything else.
     slint::BackendSelector::new()
@@ -198,10 +242,21 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
 
     let app = App::new()?;
     let session: Rc<RefCell<Option<Session>>> = Rc::default();
+    let ssh_service: Rc<RefCell<Option<SshService>>> = Rc::default();
+    let settings = Rc::new(Launch {
+        code: launch.code.clone(),
+        server: launch.server.clone(),
+        port: launch.port,
+        ssh_pubkey: launch.ssh_pubkey.clone(),
+        ssh_only: launch.ssh_only,
+        problem: None,
+    });
 
     let weak = app.as_weak();
     let confirm_session = session.clone();
+    let confirm_service = ssh_service.clone();
     let confirm_runtime = runtime.clone();
+    let confirm_settings = settings.clone();
     app.on_confirm(move |code| {
         let Some(app) = weak.upgrade() else {
             return;
@@ -211,10 +266,10 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
             return;
         }
         app.set_error_text(SharedString::new());
-        let credential = match Credential::parse(&code) {
+        let credential = match confirm_settings.credential(&code) {
             Ok(credential) => credential,
-            Err(_) => {
-                app.set_error_text(FailReason::BadCredential.to_string().into());
+            Err(message) => {
+                app.set_error_text(message.into());
                 return;
             }
         };
@@ -224,6 +279,12 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
         } else {
             backend::start(&confirm_runtime, credential)
         };
+        // Also on a retry: the server stops with every connection that fails.
+        let configured = confirm_settings.ssh_pubkey.as_deref();
+        if is_configured_key(configured, &app.get_ssh_pubkey()) {
+            *confirm_service.borrow_mut() =
+                start_ssh(&app, &confirm_runtime, &connection, configured);
+        }
         *slot = Some(Session {
             connection,
             last_tx: 0,
@@ -247,8 +308,12 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
         show_key_validity(&app, &key);
         app.set_ssh_pubkey(key.into());
     }
+    if let Some(key) = &settings.ssh_pubkey {
+        show_key_validity(&app, key);
+        app.set_ssh_pubkey(key.as_str().into());
+    }
+    app.set_ssh_only(settings.ssh_only);
     app.set_ssh_admin(ssh::shell_is_admin());
-    let ssh_service: Rc<RefCell<Option<SshService>>> = Rc::default();
 
     let weak = app.as_weak();
     app.on_ssh_pubkey_edited(move |text| {
@@ -261,6 +326,7 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
     let toggle_session = session.clone();
     let toggle_service = ssh_service.clone();
     let toggle_runtime = runtime.clone();
+    let toggle_settings = settings.clone();
     app.on_ssh_toggled(move |on| {
         let Some(app) = weak.upgrade() else {
             return;
@@ -275,27 +341,12 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
             app.set_ssh_on(false);
             return;
         };
-        let key = app.get_ssh_pubkey();
-        let saved = store::Store::open_default().and_then(|s| s.save_authorized_key(&key));
-        let prepared = saved.and_then(|()| ssh::prepare(&key));
-        match prepared {
-            Ok((allowed, host_key)) => {
-                let started = SshService::start(
-                    &toggle_runtime,
-                    allowed,
-                    host_key,
-                    active.connection.status.clone(),
-                    active.connection.ssh_source.clone(),
-                );
-                app.set_ssh_fingerprint(started.host_fingerprint.as_str().into());
-                show_ssh(&app, &started);
-                *service = Some(started);
-            }
-            Err(error) => {
-                app.set_ssh_on(false);
-                app.set_ssh_key_error(error.to_string().into());
-            }
-        }
+        *service = start_ssh(
+            &app,
+            &toggle_runtime,
+            &active.connection,
+            toggle_settings.ssh_pubkey.as_deref(),
+        );
     });
 
     let weak = app.as_weak();
@@ -315,6 +366,22 @@ pub fn run(runtime: Handle) -> Result<(), slint::PlatformError> {
             }
         }
     });
+
+    // Everything above is wired up, so this behaves exactly like a person clicking.
+    if let Some(code) = &settings.code {
+        app.set_code(code.as_str().into());
+    }
+    let key_is_usable = settings
+        .ssh_pubkey
+        .as_deref()
+        .is_none_or(|key| store::parse_public_key(key).is_ok());
+    if let Some(problem) = &launch.problem {
+        app.set_error_text(problem.as_str().into());
+    } else if !key_is_usable {
+        app.set_error_text("启动配置里的 SSH 公钥无效".into());
+    } else if let Some(code) = &settings.code {
+        app.invoke_confirm(code.as_str().into());
+    }
 
     app.run()?;
 

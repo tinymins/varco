@@ -261,6 +261,68 @@ ex s1 "pkill -INT -x varco"
 sleep 3
 refuse "leaving ends remote processes" ex s1 "pgrep -f '[s]leep 986'"
 
+echo "== one-click start: settings file and command line"
+# Odd name on purpose: the settings file follows the executable's own name.
+ex s1 "mkdir -p /tmp/app; cp $BIN /tmp/app/tool-1.2.3-x; rm -f /tmp/app/*.toml"
+TOOL=/tmp/app/tool-1.2.3-x
+CONF=/tmp/app/tool-1.2.3-x.toml
+OUT_C=$(ex s1 "$TOOL --help" 2>&1); echo "$OUT_C" | grep -q -- '--ssh-pubkey' && ok "--help lists the new options" || bad "--help is missing options"
+write_conf() { docker exec -i varco-s1 bash -c "cat > $CONF"; }
+ssh_ip_in() { ex s1 "sed -n 's/^SSH 已开启：\\([0-9.]*\\):.*/\\1/p' $1 | tail -1" 2>/dev/null; }
+stop_tool() { ex s1 "pkill -INT -x tool-1.2.3-x; true"; sleep 2; }
+start_tool() { ex s1 "rm -f /tmp/tool.log"; docker exec -d varco-s1 bash -c "cd / && $TOOL $1 </dev/null >/tmp/tool.log 2>&1"; }
+wait_tool_ip() { for _ in $(seq 40); do local ip; ip=$(ssh_ip_in /tmp/tool.log); [ -n "$ip" ] && { echo "$ip"; return 0; }; sleep 0.5; done; return 1; }
+sshc() { ex a1 "ssh -i /tmp/id $SSH_OPTS root@$1 $(printf '%q' "$2")"; }
+write_conf <<CONF_END
+code = "$CODE_A"
+ssh_pubkey = "$PUBKEY"
+CONF_END
+start_tool ""
+IP_T=$(wait_tool_ip)
+if [ -n "$IP_T" ]; then ok "settings file alone joins and starts SSH"; else bad "settings file did not start"; ex s1 "cat /tmp/tool.log"; fi
+[ -z "$(mesh_ip s1)" ] && ok "a key in the file defaults to SSH-only" || bad "a NIC appeared by default"
+[ "$(sshc "$IP_T" 'echo from-file')" = "from-file" ] && ok "ssh works with the file's key" || bad "ssh failed with the file's key"
+stop_tool
+
+write_conf <<CONF_END
+code = "$CODE_A"
+ssh_pubkey = "$PUBKEY"
+port = 1
+CONF_END
+start_tool ""
+sleep 4
+refuse "a wrong port in the file does not connect" test -n "$(ssh_ip_in /tmp/tool.log)"
+check  "and says it cannot reach the server" ex s1 "grep -q '失败' /tmp/tool.log"
+stop_tool
+start_tool "--port $PORT"
+IP_T=$(wait_tool_ip)
+[ "$(sshc "$IP_T" 'echo from-flag' 2>/dev/null)" = "from-flag" ] && ok "--port beats the file" || { bad "--port did not override"; ex s1 "cat /tmp/tool.log"; }
+stop_tool
+
+ex s1 "rm -f $CONF"
+start_tool "--code $CODE_A --ssh-pubkey '$PUBKEY'"
+IP_T=$(wait_tool_ip)
+[ "$(sshc "$IP_T" 'echo no-file' 2>/dev/null)" = "no-file" ] && ok "command line alone is enough" || { bad "command line alone failed"; ex s1 "cat /tmp/tool.log"; }
+stop_tool
+
+# Another server is the same as a network redirecting the address: the pin must hold.
+docker exec varco-srv cat /etc/varco/config.toml | sed "s/0.0.0.0:$PORT/0.0.0.0:9443/; s/varco-srv:$PORT/varco-a2:9443/" | docker exec -i varco-a2 bash -c "mkdir -p /tmp/other; cat > /tmp/other/config.toml"
+docker exec -d varco-a2 bash -c "cd /tmp/other && $BIN server -c /tmp/other/config.toml >/tmp/other/server.log 2>&1"
+sleep 2
+ex s1 "timeout 15 $TOOL --code $CODE_A --ssh-pubkey '$PUBKEY' --server varco-a2 --port 9443 </dev/null >/tmp/pin.log 2>&1"
+check  "--server cannot bypass the certificate pin" ex s1 "grep -q '证书' /tmp/pin.log"
+refuse "and nothing joined that server" ex a2 "grep -q 'member online' /tmp/other/server.log"
+ex a2 "pkill -f 'server -c /tmp/other/config.toml'; true"
+
+write_conf <<CONF_END
+cod = "$CODE_A"
+CONF_END
+ex s1 "$TOOL </dev/null >/tmp/bad.log 2>&1"
+[ $? != 0 ] && ok "a mistyped setting stops the start" || bad "a mistyped setting was ignored"
+check  "and names the file" ex s1 "grep -q 'tool-1.2.3-x.toml' /tmp/bad.log"
+refuse "and does not print the code" ex s1 "grep -qF '$CODE_A' /tmp/bad.log"
+ex s1 "rm -f $CONF"
+
 echo "== secrets stay out of logs"
 SECRET_VALUE=$(secret "$OUT_A")
 refuse "secret absent from server log" ex srv "grep -qF '$SECRET_VALUE' /tmp/server.log"

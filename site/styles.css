@@ -164,6 +164,8 @@ h3 { font-size: 18px; font-weight: 600; line-height: 1.4; }
 .dl-links { display: flex; flex-wrap: wrap; gap: 8px; }
 .dl-links a { padding: 5px 16px; border: 1px solid var(--ink); border-radius: 999px; font-size: 14px; text-decoration: none; transition: background .15s, color .15s; }
 .dl-links a:hover { background: var(--ink); color: var(--paper); }
+.dl-note { margin-top: 20px; font-size: 14px; color: var(--muted); }
+.dl-note code { font-size: .92em; }
 .dl-more { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; font-size: 14px; color: var(--muted); }
 @media (max-width: 680px) { .dl-row { grid-template-columns: 1fr; } }
 

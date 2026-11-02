@@ -49,6 +49,8 @@ export component App inherits Window {
     in property <color> ssh-status-color: #1a7f37;
     in property <string> ssh-command;
     in property <string> ssh-fingerprint;
+    // Set when the key came with the package: whoever runs it should see who can log in.
+    in property <string> ssh-configured-key;
     in property <bool> ssh-admin;
 
     callback confirm(string);
@@ -193,6 +195,12 @@ export component App inherits Window {
                             ssh-clipboard.copy();
                         }
                     }
+                }
+                if root.ssh-on && root.ssh-configured-key != "": Text {
+                    text: "SSH 由启动配置自动开启，可登录的公钥 " + root.ssh-configured-key;
+                    color: #b54708;
+                    font-size: 12px;
+                    wrap: word-wrap;
                 }
                 if root.ssh-on && root.ssh-fingerprint != "": Text {
                     text: "主机指纹 " + root.ssh-fingerprint;
