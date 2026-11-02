@@ -20,7 +20,7 @@
 |---|---|---|
 | Windows | `varco-windows-x64.exe`、`varco-windows-arm64.exe` | 窗口客户端 |
 | macOS | `varco-macos-arm64.zip`、`varco-macos-x64.zip` | 窗口客户端 |
-| Linux 桌面 | `varco-linux-gui-x64`、`varco-linux-gui-arm64` | 窗口客户端 |
+| Linux 桌面 | `varco-linux-gui-x64`、`varco-linux-gui-arm64` | 窗口客户端，需要 glibc 2.36 以上和 fontconfig |
 | Linux 服务器 | `varco-linux-x64`、`varco-linux-arm64` | 服务端和无界面客户端，静态链接 |
 
 ## 客户端
@@ -105,7 +105,7 @@ journalctl -u varco -f
 ```sh
 cargo test                # 单元测试和真实 TLS 上的集成测试，不需要 root
 tests/e2e/run.sh          # Docker 内真实 TUN 的端到端测试，约 6 分钟
-cargo run --features gui  # 带窗口运行（Linux 需要 fontconfig，或设置 RUST_FONTCONFIG_DLOPEN=1）
+cargo run --features gui  # 带窗口运行（Linux 需要 libfontconfig1-dev）
 scripts/package.sh        # 在 macOS 上本地构建发布产物到 dist/
 ```
 

@@ -333,8 +333,21 @@ fn start_isolated_server(addr: SocketAddr, identity: &Identity) -> tokio::runtim
         .unwrap();
     let config = tls::server_config(identity).unwrap();
     let hub = Arc::new(Hub::new(networks()));
+    // Bound before returning, so a client started next cannot be refused. Retries
+    // because a runtime shut down just now may still be closing its listener.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let listener = loop {
+        match std::net::TcpListener::bind(addr) {
+            Ok(listener) => break listener,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("binding {addr}: {error}"),
+        }
+    };
+    listener.set_nonblocking(true).unwrap();
     runtime.spawn(async move {
-        let listener = TcpListener::bind(addr).await.unwrap();
+        let listener = TcpListener::from_std(listener).unwrap();
         let _ = varco::server::serve(listener, hub, config).await;
     });
     runtime

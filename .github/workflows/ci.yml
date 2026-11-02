@@ -13,10 +13,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Load fontconfig at run time, so builds need no system fontconfig package.
-  RUST_FONTCONFIG_DLOPEN: "1"
-
 jobs:
   check:
     name: fmt + clippy
@@ -30,6 +26,7 @@ jobs:
             target
           key: check-${{ hashFiles('Cargo.lock') }}
           restore-keys: check-
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libfontconfig1-dev
       - run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets --features gui -- -D warnings
@@ -51,6 +48,8 @@ jobs:
           key: test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: test-${{ runner.os }}-
       - run: rustup update stable && rustup default stable
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libfontconfig1-dev
       - run: cargo test --locked
       # Also proves the window front end and platform-specific code compile.
       - run: cargo build --locked --features gui
