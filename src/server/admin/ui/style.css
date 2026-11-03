@@ -194,6 +194,7 @@ p { margin: 0; }
   position: relative; padding: 10px 10px; border: 0; background: none; color: var(--muted); font: inherit; white-space: nowrap; cursor: pointer;
   transition: color .12s;
 }
+.tab-end { margin-left: auto; }
 .tab:hover { color: var(--text); }
 .tab:focus-visible { outline-offset: -2px; }
 .tab.is-active { color: var(--text); font-weight: 600; }

@@ -219,9 +219,11 @@ function drawApp() {
       scopeName && el("span", { class: "topbar-scope", title: scopeName }, scopeName),
       el("span", { class: "topbar-spacer" }),
       userMenu()),
-    items.length ? tabs(items, current.tab, (key) => { current.tab = key; drawApp(); }) : null,
+    tabs([...items, ["me", "我的账号设置", { end: true }]], current.tab, (key) => { current.tab = key; drawApp(); }),
     content,
   );
+  // On a narrow screen the tab bar scrolls, and the chosen tab may be off the end.
+  document.querySelector(".tab.is-active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   drawTab(content);
 }
 

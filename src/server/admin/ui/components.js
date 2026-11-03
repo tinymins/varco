@@ -504,9 +504,10 @@ function stat(label, value, unit) {
 const badge = (text, tone = "neutral") => el("span", { class: "badge badge-" + tone }, text);
 const notice = (text, tone) => el("p", { class: "notice notice-" + tone }, text);
 
+// items: [key, label, { end }]; `end` sets a tab apart at the far side.
 function tabs(items, active, onchange) {
-  return el("nav", { class: "tabs" }, items.map(([key, label]) => el("button", {
-    type: "button", class: cx("tab", key === active && "is-active"), "data-tab": key,
+  return el("nav", { class: "tabs" }, items.map(([key, label, { end } = {}]) => el("button", {
+    type: "button", class: cx("tab", end && "tab-end", key === active && "is-active"), "data-tab": key,
     "aria-current": key === active ? "page" : null,
     onclick: () => onchange(key),
   }, label)));
