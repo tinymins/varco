@@ -50,7 +50,7 @@ jobs:
           APP=varco.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/${{ matrix.target }}/release/varco "$APP/Contents/MacOS/varco"
-          sed "s/@VERSION@/$VERSION/" deploy/Info.plist > "$APP/Contents/Info.plist"
+          sed "s/@VERSION@/${VERSION%%-*}/" deploy/Info.plist > "$APP/Contents/Info.plist"
           cp assets/fonts/OFL-LICENSE.txt "$APP/Contents/Resources/NotoSansSC-OFL.txt"
           codesign --force --deep --sign - "$APP"
           ditto -c -k --keepParent "$APP" varco-macos-${{ matrix.arch }}.zip
@@ -125,4 +125,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --title "$GITHUB_REF_NAME" --generate-notes
+        # A tag like v1.0.0-beta.1 must not become "latest", which the website downloads from.
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease=--prerelease ;;
+            *) prerelease= ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" artifacts/* --title "$GITHUB_REF_NAME" --generate-notes $prerelease
