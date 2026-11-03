@@ -115,10 +115,10 @@ echo "== rejected joins (run in b1 as a one-off process, which must exit by itse
 attempt() { docker exec -e "VARCO_CREDENTIAL=$1" varco-b1 timeout 20 "$BIN" 2>&1; }
 expect_msg() { local name=$1 code=$2 pattern=$3; local out; out=$(attempt "$code"); local rc=$?
   if [ "$rc" = 1 ] && echo "$out" | grep -q "$pattern"; then ok "$name"; else bad "$name (rc=$rc: $out)"; fi; }
-REVOKED_REPLY=$(api POST "w/$WS_A/codes" '{"note":"to revoke"}')
-UNLISTED=$(echo "$REVOKED_REPLY" | field code)
-api POST "w/$WS_A/codes/$(echo "$REVOKED_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')/revoke" >/dev/null
-expect_msg "revoked Code is rejected"      "$UNLISTED" "无效或已被撤销"
+DELETED_REPLY=$(api POST "w/$WS_A/codes" '{"note":"to delete"}')
+UNLISTED=$(echo "$DELETED_REPLY" | field code)
+api DELETE "w/$WS_A/codes/$(echo "$DELETED_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')" >/dev/null
+expect_msg "deleted Code is rejected"      "$UNLISTED" "无效或已被删除"
 expect_msg "malformed code is rejected"    "garbage"   "格式不正确"
 # A different server key gives a valid code whose pin does not match this server.
 docker exec -d varco-srv bash -c "$BIN server --data-dir /tmp/other --admin-listen 127.0.0.1:8445 >>/tmp/other.log 2>&1"
@@ -133,7 +133,7 @@ ex srv "pkill -f 'data-dir /tmp/other'; true"
 ADMIN=8444; COOKIES=/tmp/console.cookies
 expect_msg "wrong pin (simulated MITM) is rejected" "$WRONG_PIN" "证书与 Code 不符"
 REFUSED=$(ex srv "grep -c 'connection rejected' /tmp/server.log")
-[ "$REFUSED" = 1 ] && ok "only the revoked secret reached the server's auth step" \
+[ "$REFUSED" = 1 ] && ok "only the deleted secret reached the server's auth step" \
                    || bad "expected 1 auth rejection, got $REFUSED"
 
 echo "== inner TCP survives a 60 s outage"
@@ -163,7 +163,7 @@ stop_server; sleep 2; start_server
 check  "a1 -> a2 after restart"            wait_ping a1 "$IP_A2" 60
 check  "a1 address unchanged"              ex a1 "ip -4 -o addr | grep -q ' $IP_A1/'"
 check  "a2 address unchanged"              ex a2 "ip -4 -o addr | grep -q ' $IP_A2/'"
-refuse "code still valid after restart (key kept)" ex a1 "grep -q '无效或已被撤销' /tmp/client.log"
+refuse "code still valid after restart (key kept)" ex a1 "grep -q '无效或已被删除' /tmp/client.log"
 
 echo "== a stuck client does not affect others"
 ex a2 "pkill -STOP -x varco"
@@ -435,8 +435,8 @@ check  "and the client keeps trying without being told why" ex a3 "pgrep -x varc
 api DELETE "bans/$BAN_ID" >/dev/null
 check  "lifting the address ban restores it" wait_ping a1 "$IP_A3" 40
 
-api POST "w/$WS_A/codes/$TIMED_ID/revoke" >/dev/null
-a3_exits_with "无效或已被撤销" && ok "revoking a Code removes who came with it" || bad "the revoked Code's client stayed"
+api DELETE "w/$WS_A/codes/$TIMED_ID" >/dev/null
+a3_exits_with "无效或已被删除" && ok "deleting a Code removes who came with it" || bad "the deleted Code's client stayed"
 
 echo "== console: workspaces and accounts"
 WS_C=$(api POST workspaces '{"name":"team-c","cidr":"10.77.1.0/24","owner_username":"carol","owner_password":"first"}' | number id)
@@ -467,7 +467,7 @@ ROOT_TOKEN=$(api POST tokens '{"name":"e2e-root"}' | field token)
 check  "a super token reads metrics" ex srv "curl -s -H 'Authorization: Bearer $ROOT_TOKEN' http://127.0.0.1:$ADMIN/metrics | grep -q 'varco_members_online{workspace=\"team-c\"} 1'"
 check  "health needs no login" ex srv "curl -s http://127.0.0.1:$ADMIN/healthz | grep -q 'relay_listening\":true'"
 api DELETE "workspaces/$WS_C" >/dev/null
-a3_exits_with "无效或已被撤销" && ok "deleting a workspace stops its clients" || bad "the deleted workspace's client stayed"
+a3_exits_with "无效或已被删除" && ok "deleting a workspace stops its clients" || bad "the deleted workspace's client stayed"
 check  "and leaves the others alone" wait_ping a1 "$IP_A2" 10
 [ "$(api GET "w/$WS_A/connections" | number total)" -gt 0 ] && ok "connections are in the history" || bad "no connection history"
 

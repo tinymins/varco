@@ -113,7 +113,6 @@ p { margin: 0; }
 .field-label { color: var(--muted); font-size: 13px; }
 .field-hint { color: var(--muted); font-size: 12px; }
 .check { display: flex; align-items: center; gap: 8px; min-height: var(--control); cursor: pointer; }
-.form-grid > .check { align-self: flex-start; margin-top: 24px; }
 .checkbox {
   appearance: none; width: 16px; height: 16px; margin: 0; flex: none; border: 1px solid var(--line-strong); border-radius: 4px;
   background: var(--surface); cursor: pointer; transition: background-color .12s, border-color .12s;
@@ -124,9 +123,6 @@ p { margin: 0; }
   box-shadow: inset 0 0 0 3px var(--surface);
 }
 
-.form-grid { display: flex; flex-wrap: wrap; gap: 12px; }
-.form-grid > * { flex: 1 1 190px; }
-.form-grid > .wide, .form-grid > .form-actions { flex-basis: 100%; }
 .form-stack { display: grid; gap: 12px; max-width: 520px; }
 .form-actions { display: flex; gap: 8px; }
 
@@ -235,7 +231,6 @@ main > * { min-width: 0; }
 .notice-warn { background: var(--warn-bg); color: var(--warn-text); }
 
 .dialog-form .notice { margin: 0; }
-.form-grid + .table-wrap, .form-grid + .empty { margin-top: 16px; }
 .secret-row { display: grid; gap: 6px; min-width: 0; }
 .secret-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .secret-label { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }

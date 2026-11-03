@@ -287,17 +287,6 @@ pub async fn update_code(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn revoke_code(
-    State(console): State<Arc<Console>>,
-    scoped: Scoped,
-    Path((_, code)): Path<(WorkspaceId, String)>,
-) -> ApiResult<StatusCode> {
-    let id = scoped.workspace.id;
-    console.hub.revoke_code(id, &code, unix_now())?;
-    console.audit(&scoped.actor, Some(id), "revoke_code", &code);
-    Ok(StatusCode::NO_CONTENT)
-}
-
 pub async fn delete_code(
     State(console): State<Arc<Console>>,
     scoped: Scoped,

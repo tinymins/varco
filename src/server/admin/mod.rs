@@ -568,7 +568,6 @@ pub fn router(console: Arc<Console>) -> Router {
             patch(w::update_code).delete(w::delete_code),
         )
         .route("/api/w/{ws}/codes/{id}/copies", get(w::code_copies))
-        .route("/api/w/{ws}/codes/{id}/revoke", post(w::revoke_code))
         .route("/api/w/{ws}/bans", get(w::bans).post(w::add_ban))
         .route(
             "/api/w/{ws}/bans/{id}",

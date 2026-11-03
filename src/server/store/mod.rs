@@ -105,8 +105,7 @@ CREATE TABLE codes (
     max_uses INTEGER,
     expires_at INTEGER,
     note TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    revoked_at INTEGER
+    created_at INTEGER NOT NULL
 );
 CREATE TABLE code_uses (
     code_id TEXT NOT NULL REFERENCES codes ON DELETE CASCADE,

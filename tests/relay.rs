@@ -957,8 +957,8 @@ async fn a_banned_address_is_dropped_before_tls_until_lifted() {
 }
 
 #[tokio::test]
-async fn revoking_a_code_removes_those_who_came_with_it_and_nobody_else() {
-    let server = start_managed("revoke").await;
+async fn deleting_a_code_removes_those_who_came_with_it_and_nobody_else() {
+    let server = start_managed("delete").await;
     let (id, secret) = server.timed(3600);
     let mut with_code = server.peer(secret, "with-code");
     let mut permanent = server.peer(SECRET_A, "permanent");
@@ -973,7 +973,7 @@ async fn revoking_a_code_removes_those_who_came_with_it_and_nobody_else() {
         Some(id.as_str())
     );
 
-    server.hub.revoke_code(server.a, &id, unix_now()).unwrap();
+    server.hub.delete_code(server.a, &id).unwrap();
     assert_eq!(with_code.failure().await, FailReason::CredentialRejected);
     let mut late = server.peer(secret, "late");
     assert_eq!(late.failure().await, FailReason::CredentialRejected);

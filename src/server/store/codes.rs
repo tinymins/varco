@@ -43,7 +43,6 @@ pub enum CodeStatus {
     Active,
     Used,
     Expired,
-    Revoked,
 }
 
 /// Leaves out the secret, which is only handed over by [`Store::code_secret`].
@@ -55,15 +54,12 @@ pub struct CodeRecord {
     pub limits: CodeLimits,
     pub note: String,
     pub created_at: u64,
-    pub revoked_at: Option<u64>,
     pub status: CodeStatus,
     pub used_by: Vec<CodeUse>,
 }
 
-fn status_of(limits: CodeLimits, revoked: bool, uses: usize, now: u64) -> CodeStatus {
-    if revoked {
-        CodeStatus::Revoked
-    } else if limits.expires_at.is_some_and(|at| now >= at) {
+fn status_of(limits: CodeLimits, uses: usize, now: u64) -> CodeStatus {
+    if limits.expires_at.is_some_and(|at| now >= at) {
         CodeStatus::Expired
     } else if limits.max_uses.is_some_and(|max| uses >= max as usize) {
         CodeStatus::Used
@@ -112,15 +108,12 @@ pub struct Reservation {
 impl Reservation {
     pub fn commit(&self, details: &UseDetails<'_>, now: u64) -> Result<(), ChangeError> {
         let inner = self.store.lock();
-        let revoked: Option<Option<i64>> = inner
-            .db
-            .query_row(
-                "SELECT revoked_at FROM codes WHERE id = ?1",
-                [&self.code_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if !matches!(revoked, Some(None)) {
+        let exists: i64 = inner.db.query_row(
+            "SELECT COUNT(*) FROM codes WHERE id = ?1",
+            [&self.code_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
             return Err(ChangeError::NotFound);
         }
         inner.db.execute(
@@ -166,7 +159,7 @@ impl Store {
             .db
             .query_row(
                 "SELECT id, workspace_id, max_uses, expires_at FROM codes
-                 WHERE secret_hash = ?1 AND revoked_at IS NULL",
+                 WHERE secret_hash = ?1",
                 [&hash],
                 |row| {
                     let id: String = row.get(0)?;
@@ -275,19 +268,17 @@ impl Store {
             limits,
             note: note.to_owned(),
             created_at: now,
-            revoked_at: None,
-            status: status_of(limits, false, 0, now),
+            status: status_of(limits, 0, now),
             used_by: Vec::new(),
         })
     }
 
-    /// For copying a Code again. A revoked one is not found: it can never work again.
+    /// For copying a Code again.
     pub fn code_secret(&self, workspace: WorkspaceId, id: &str) -> Result<Secret, ChangeError> {
         self.lock()
             .db
             .query_row(
-                "SELECT secret FROM codes
-                 WHERE workspace_id = ?1 AND id = ?2 AND revoked_at IS NULL",
+                "SELECT secret FROM codes WHERE workspace_id = ?1 AND id = ?2",
                 params![workspace, id],
                 |row| row.get(0),
             )
@@ -305,7 +296,7 @@ impl Store {
         let row = inner
             .db
             .query_row(
-                "SELECT id, workspace_id, max_uses, expires_at, note, created_at, revoked_at
+                "SELECT id, workspace_id, max_uses, expires_at, note, created_at
                  FROM codes WHERE workspace_id = ?1 AND id = ?2",
                 params![workspace, id],
                 code_row,
@@ -329,7 +320,7 @@ impl Store {
             |row| row.get(0),
         )?;
         let mut statement = inner.db.prepare(&format!(
-            "SELECT id, workspace_id, max_uses, expires_at, note, created_at, revoked_at
+            "SELECT id, workspace_id, max_uses, expires_at, note, created_at
              FROM codes WHERE {filter} ORDER BY created_at DESC, id LIMIT ?3 OFFSET ?4"
         ))?;
         let rows = statement
@@ -346,30 +337,6 @@ impl Store {
             items,
             total: total as u64,
         })
-    }
-
-    /// Scoped to the workspace, so an id from another one is simply not found.
-    pub fn revoke_code(
-        &self,
-        workspace: WorkspaceId,
-        id: &str,
-        now: u64,
-    ) -> Result<(), ChangeError> {
-        let inner = self.lock();
-        let found: i64 = inner.db.query_row(
-            "SELECT COUNT(*) FROM codes WHERE workspace_id = ?1 AND id = ?2",
-            params![workspace, id],
-            |row| row.get(0),
-        )?;
-        if found == 0 {
-            return Err(ChangeError::NotFound);
-        }
-        inner.db.execute(
-            "UPDATE codes SET revoked_at = ?3
-             WHERE workspace_id = ?1 AND id = ?2 AND revoked_at IS NULL",
-            params![workspace, id, now as i64],
-        )?;
-        Ok(())
     }
 
     /// `expiry` of `Some(None)` removes the deadline. Changing it never affects
@@ -399,7 +366,7 @@ impl Store {
         // Its users were never recorded, so a deadline would cut them off.
         if limits.is_permanent() && matches!(expiry, Some(Some(_))) {
             return Err(ChangeError::Conflict(
-                "永久 Code 不能加期限，请撤销后重新生成".to_owned(),
+                "永久 Code 不能加期限，请删除后重新生成".to_owned(),
             ));
         }
         if let Some(note) = note {
@@ -417,6 +384,7 @@ impl Store {
         Ok(())
     }
 
+    /// Scoped to the workspace, so an id from another one is simply not found.
     pub fn delete_code(&self, workspace: WorkspaceId, id: &str) -> Result<(), ChangeError> {
         let affected = self.lock().db.execute(
             "DELETE FROM codes WHERE workspace_id = ?1 AND id = ?2",
@@ -433,7 +401,7 @@ impl Store {
         self.lock()
             .db
             .query_row(
-                "SELECT workspace_id FROM codes WHERE secret_hash = ?1 AND revoked_at IS NULL",
+                "SELECT workspace_id FROM codes WHERE secret_hash = ?1",
                 [secret_key(secret)],
                 |row| row.get(0),
             )
@@ -441,11 +409,12 @@ impl Store {
     }
 
     pub fn code_is_live(&self, id: &str) -> rusqlite::Result<bool> {
-        let count: i64 = self.lock().db.query_row(
-            "SELECT COUNT(*) FROM codes WHERE id = ?1 AND revoked_at IS NULL",
-            [id],
-            |row| row.get(0),
-        )?;
+        let count: i64 =
+            self.lock()
+                .db
+                .query_row("SELECT COUNT(*) FROM codes WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })?;
         Ok(count > 0)
     }
 }
@@ -456,7 +425,6 @@ struct CodeRow {
     limits: CodeLimits,
     note: String,
     created_at: u64,
-    revoked_at: Option<u64>,
 }
 
 fn code_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeRow> {
@@ -469,7 +437,6 @@ fn code_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeRow> {
         },
         note: row.get(4)?,
         created_at: row.get::<_, i64>(5)? as u64,
-        revoked_at: row.get::<_, Option<i64>>(6)?.map(|at| at as u64),
     })
 }
 
@@ -490,13 +457,12 @@ fn finish_code(db: &rusqlite::Connection, row: CodeRow, now: u64) -> rusqlite::R
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(CodeRecord {
-        status: status_of(row.limits, row.revoked_at.is_some(), used_by.len(), now),
+        status: status_of(row.limits, used_by.len(), now),
         id: row.id,
         workspace_id: row.workspace_id,
         limits: row.limits,
         note: row.note,
         created_at: row.created_at,
-        revoked_at: row.revoked_at,
         used_by,
     })
 }

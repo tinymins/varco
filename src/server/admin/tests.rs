@@ -190,7 +190,6 @@ const ROUTES: &[(&str, &str, Needs)] = &[
     ("PATCH", "/api/w/{ws}/codes/{id}", Needs::Member),
     ("DELETE", "/api/w/{ws}/codes/{id}", Needs::Member),
     ("GET", "/api/w/{ws}/codes/{id}/copies", Needs::Member),
-    ("POST", "/api/w/{ws}/codes/{id}/revoke", Needs::Member),
     ("GET", "/api/w/{ws}/bans", Needs::Member),
     ("POST", "/api/w/{ws}/bans", Needs::Member),
     ("DELETE", "/api/w/{ws}/bans/{id}", Needs::Member),
@@ -364,11 +363,6 @@ async fn nothing_of_another_workspace_can_be_touched_by_its_id() {
     let a = h.a;
     let attempts = [
         (
-            Method::POST,
-            format!("/api/w/{a}/codes/{}/revoke", code.id),
-            json!({}),
-        ),
-        (
             Method::PATCH,
             format!("/api/w/{a}/codes/{}", code.id),
             json!({"note": "x"}),
@@ -415,7 +409,6 @@ async fn nothing_of_another_workspace_can_be_touched_by_its_id() {
     }
     let unchanged = store.code(h.b, &code.id, now).unwrap().unwrap();
     assert_eq!(unchanged.note, "theirs");
-    assert_eq!(unchanged.revoked_at, None);
     assert_eq!(store.role_of(their_admin, h.b).unwrap(), Some(Role::Admin));
     assert!(store.user(their_admin).unwrap().is_some());
     assert_eq!(store.tokens(Some(h.b)).unwrap().len(), 1);
@@ -1333,11 +1326,7 @@ async fn a_code_can_be_copied_again_with_each_of_my_keys() {
     assert!(audit["total"].as_u64().unwrap() >= 3, "{audit}");
 
     let (status, _) = h
-        .as_root(
-            Method::POST,
-            &format!("{codes}/{id}/revoke"),
-            Some(json!({})),
-        )
+        .as_root(Method::DELETE, &format!("{codes}/{id}"), Some(json!({})))
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = h.as_root(Method::GET, &copies_uri, None).await;

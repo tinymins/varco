@@ -120,8 +120,8 @@ function input({ mono, ...props } = {}) {
   return el("input", { class: cx("input", mono && "mono"), ...props });
 }
 
-function field(label, control, { hint, wide } = {}) {
-  return el("label", { class: cx("field", wide && "wide") },
+function field(label, control, { hint } = {}) {
+  return el("label", { class: "field" },
     el("span", { class: "field-label" }, label),
     control,
     hint && el("span", { class: "field-hint" }, hint));
@@ -136,9 +136,9 @@ function checkbox(label, { id } = {}) {
 }
 
 // Runs the action with the submit button spinning; a failure ends up in a toast.
-function formOf({ id, layout = "grid" }, action, ...children) {
+function formOf({ id }, action, ...children) {
   let busy = false;
-  return el("form", { id, class: "form-" + layout, onsubmit: async (event) => {
+  return el("form", { id, class: "form-stack", onsubmit: async (event) => {
     event.preventDefault();
     if (busy) return;
     busy = true;
@@ -438,6 +438,11 @@ function dialog({ title, message, control, confirmLabel = "确定", danger, read
     first.focus();
     first.select();
   }
+}
+
+// A dialog with several fields; `fields` may hold gaps for ones that don't apply.
+function formDialog({ fields, ...rest }) {
+  dialog({ ...rest, control: el("div", { class: "dialog-fields" }, fields) });
 }
 
 // For reading and copying: nothing to confirm, so the only button closes it.

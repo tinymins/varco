@@ -61,8 +61,8 @@ const askNewPassword = (path) => askText({
   type: "password",
 }, (password) => api("POST", path, { password }), "已重置");
 
-const STATUS = { active: "可用", used: "已用完", expired: "已过期", revoked: "已撤销" };
-const STATUS_TONE = { active: "success", used: "muted", expired: "muted", revoked: "muted" };
+const STATUS = { active: "可用", used: "已用完", expired: "已过期" };
+const STATUS_TONE = { active: "success", used: "muted", expired: "muted" };
 const STANDING = { super: "超管", owner: "owner", admin: "管理员" };
 const ROLE = { owner: "owner", admin: "管理员" };
 const ROLE_TONE = { owner: "success", admin: "neutral" };
@@ -70,7 +70,7 @@ const ACTIONS = {
   login: "登录", login_failed: "登录失败", logout: "退出", change_password: "修改密码", end_session: "结束会话",
   update_settings: "修改服务设置", create_workspace: "创建工作区", update_workspace: "修改工作区", delete_workspace: "删除工作区",
   delete_user: "删除账号", reset_password: "重置密码", add_admin: "添加管理员", remove_admin: "移除管理员", set_role: "修改角色",
-  create_code: "生成 Code", update_code: "修改 Code", revoke_code: "撤销 Code", delete_code: "删除 Code",
+  create_code: "生成 Code", update_code: "修改 Code", delete_code: "删除 Code",
   copy_code: "复制 Code", copy_token: "复制 Token", add_ssh_key: "添加 SSH 公钥", delete_ssh_key: "删除 SSH 公钥",
   kick: "踢出", unkick: "解除踢出", add_ban: "拉黑", remove_ban: "解除拉黑", create_token: "创建 Token", delete_token: "删除 Token",
 };
@@ -82,6 +82,7 @@ let poll = null;
 
 const wsPath = (path = "") => "w/" + current.scope + path;
 const myWorkspace = () => me.workspaces.find((w) => w.id === current.scope);
+const addButton = (label, id, onclick) => button(label, { id, size: "sm", variant: "primary", onclick });
 const list = (key, load, render) => pagedList(pages[key] ??= { q: "", offset: 0 }, load, render);
 
 function show(...nodes) {
@@ -97,7 +98,7 @@ function showLogin() {
   const user = input({ autocomplete: "username", required: true });
   const pass = input({ type: "password", autocomplete: "current-password" });
   show(authPage("varco 管理后台", null,
-    formOf({ id: "login-form", layout: "stack" }, async () => {
+    formOf({ id: "login-form" }, async () => {
       await api("POST", "login", { username: user.value, password: pass.value });
       await boot();
     },
@@ -110,7 +111,7 @@ function showChangePassword() {
   stopPolling();
   const pass = input({ type: "password", id: "new-password", autocomplete: "new-password" });
   show(authPage("请先修改密码", "这是首次登录或密码刚被重置。密码没有任何限制，由你自己决定。",
-    formOf({ id: "password-form", layout: "stack" }, async () => {
+    formOf({ id: "password-form" }, async () => {
       await api("POST", "me/password", { password: pass.value });
       await boot();
     },
@@ -125,7 +126,7 @@ async function showSetup() {
   const addr = input({ id: "setup-addr", mono: true, value: settings.public_addr ?? settings.suggested_public_addr, required: true });
   const listen = input({ id: "setup-listen", mono: true, value: settings.relay_listen ?? settings.suggested_relay_listen, required: true });
   show(authPage("初始化服务", "客户端按对外地址连接中继。保存后中继开始监听。",
-    formOf({ id: "setup-form", layout: "stack" }, async () => {
+    formOf({ id: "setup-form" }, async () => {
       await api("PUT", "settings", { public_addr: addr.value, relay_listen: listen.value });
       await boot();
     },
@@ -270,7 +271,7 @@ async function viewMembers() {
     stats(
       stat(overview.workspace.name + " · " + overview.workspace.cidr, (summary.online ?? 0) + " / " + (summary.capacity ?? 0), "在线"),
       stat("累计收发（重启后清零）", bytes(summary.rx_bytes) + " / " + bytes(summary.tx_bytes))),
-    card("在线成员", { hint: "踢出：断开并结束这次运行，对方重开程序后，只要 Code 还有效就能回来。要彻底拦住，请撤销 Code 并拉黑设备。" },
+    card("在线成员", { hint: "踢出：断开并结束这次运行，对方重开程序后，只要 Code 还有效就能回来。要彻底拦住，请删除 Code 并拉黑设备。" },
       dataTable(["主机名", "虚拟 IP", "来源 IP", "设备", "Code", "上线时间", "收 / 发", "操作"],
         page.items.map((m) => [
           m.hostname,
@@ -341,17 +342,15 @@ function codeDialog(code) {
   const maxField = field("最多使用次数", maxUses, { hint: "每次运行算一次" });
   function sync() {
     const choice = CODE_KINDS[kind.value];
-    durationField.hidden = !choice.duration || code?.status === "revoked";
+    durationField.hidden = !choice.duration;
     maxField.hidden = choice.max !== true;
   }
   sync();
   let created = null;
-  dialog({
+  formDialog({
     title: code ? "修改 Code" : "生成 Code",
     confirmLabel: code ? "保存" : "生成",
-    control: el("div", { class: "dialog-fields" },
-      field("类型", kind, code && { hint: "类型和次数在生成后不能修改" }),
-      durationField, maxField, field("备注", note)),
+    fields: [field("类型", kind, code && { hint: "类型和次数在生成后不能修改" }), durationField, maxField, field("备注", note)],
     action: async () => {
       const choice = CODE_KINDS[kind.value];
       if (code) {
@@ -384,16 +383,15 @@ function codeRows(items) {
       cell(c.used_by.length ? c.used_by.map((u) => u.hostname + "（" + u.peer + "）").join("，") : "—", { wrap: true }),
       time(c.created_at),
       rowActions(
-        c.status !== "revoked" && rowButton("复制", () => showCodeCopies(c.id)),
+        rowButton("复制", () => showCodeCopies(c.id)),
         rowButton("修改", () => codeDialog(c)),
-        c.status !== "revoked" && rowButton("撤销", ask("撤销这个 Code？用它进来的设备会被立即断开，且不能再连接。", () => api("POST", wsPath("/codes/" + c.id + "/revoke")), "已撤销", { confirmLabel: "撤销" }), { danger: true }),
-        rowButton("删除", ask("删除这条记录？如果 Code 还有效，也会一并撤销，用它进来的设备会被断开。", () => api("DELETE", wsPath("/codes/" + c.id)), "已删除", { confirmLabel: "删除" }), { danger: true })),
+        rowButton("删除", ask("删除这个 Code？用它进来的设备会被立即断开，不能再连接，记录也一并删除，不能恢复。", () => api("DELETE", wsPath("/codes/" + c.id)), "已删除", { confirmLabel: "删除" }), { danger: true })),
     ]),
     "还没有生成过 Code");
 }
 
 function viewCodes() {
-  return card("Code", { action: button("生成 Code", { id: "code-new", size: "sm", variant: "primary", onclick: () => codeDialog() }) },
+  return card("Code", { action: addButton("生成 Code", "code-new", () => codeDialog()) },
     list("codes", (query) => api("GET", wsPath("/codes?" + query)), codeRows));
 }
 
@@ -410,7 +408,7 @@ function banRows(items, remove) {
     "黑名单是空的");
 }
 
-function banForm(submit, explanation) {
+function banDialog(submit, explanation) {
   const value = input({ id: "ban-value", mono: true, required: true, placeholder: "203.0.113.7 或 198.51.100.0/24" });
   const kind = select({
     id: "ban-kind",
@@ -419,20 +417,22 @@ function banForm(submit, explanation) {
   });
   const note = input({ id: "ban-note" });
   const duration = input({ id: "ban-duration", placeholder: "留空为永久，或 30m、24h、7d" });
-  return card("添加黑名单", { hint: explanation },
-    formOf({ id: "ban-form" }, changes(() => submit({ kind: kind.value, value: value.value, note: note.value, duration: duration.value }), "已拉黑"),
-      field("类型", kind), field("内容", value), field("备注", note), field("时长", duration),
-      formActions(submitButton("拉黑"))));
+  formDialog({
+    title: "添加黑名单",
+    message: explanation,
+    confirmLabel: "拉黑",
+    fields: [field("类型", kind), field("内容", value), field("备注", note), field("时长", duration)],
+    action: () => submit({ kind: kind.value, value: value.value, note: note.value, duration: duration.value }),
+    after: () => { toast("已拉黑", "success"); return refresh(); },
+  });
 }
 
 function viewBans() {
-  return [
-    banForm((body) => api("POST", wsPath("/bans"), body),
-      "立即断开匹配的连接，只在这个工作区生效。拉黑 IP 会影响同一出口后的所有人。设备 ID 由客户端上报，克隆的系统可能共用同一个 ID。"),
-    card("黑名单", {},
-      list("bans", (query) => api("GET", wsPath("/bans?" + query)),
-        (items) => banRows(items, (id) => api("DELETE", wsPath("/bans/" + id))))),
-  ];
+  const add = () => banDialog((body) => api("POST", wsPath("/bans"), body),
+    "立即断开匹配的连接，只在这个工作区生效。拉黑 IP 会影响同一出口后的所有人。设备 ID 由客户端上报，克隆的系统可能共用同一个 ID。");
+  return card("黑名单", { action: addButton("添加黑名单", "ban-new", add) },
+    list("bans", (query) => api("GET", wsPath("/bans?" + query)),
+      (items) => banRows(items, (id) => api("DELETE", wsPath("/bans/" + id)))));
 }
 
 function viewConnections() {
@@ -472,31 +472,36 @@ function showToken(name, token) {
   sheet({ title: "复制 Token" }, secretRow({ label: name, secret: token }));
 }
 
-function tokensSection(items, create, remove, reveal, explanation) {
+function tokenDialog(create, explanation) {
   const name = input({ id: "token-name", required: true, placeholder: "用途，如 ci" });
   const duration = input({ id: "token-duration", placeholder: "留空为永久，或 30m、24h、7d" });
-  return [
-    card("创建 Token", { hint: explanation },
-      formOf({ id: "token-form" }, async () => {
-        const created = await create({ name: name.value, duration: duration.value });
-        await refresh();
-        showToken(created.name, created.token);
-      },
-        field("名称", name), field("有效时长", duration),
-        formActions(submitButton("创建")))),
-    card("Token", {},
-      dataTable(["名称", "创建时间", "到期", "最后使用", "操作"],
-        items.map((t) => [
-          t.name,
-          time(t.created_at),
-          t.expires_at ? time(t.expires_at) : "永久",
-          time(t.last_used),
-          rowActions(
-            rowButton("复制", async () => showToken(t.name, (await reveal(t.id)).token)),
-            rowButton("删除", ask("删除这个 Token？用它的脚本会立即失效。", () => remove(t.id), "已删除", { confirmLabel: "删除" }), { danger: true })),
-        ]),
-        "还没有 Token")),
-  ];
+  let created = null;
+  formDialog({
+    title: "创建 Token",
+    message: explanation,
+    confirmLabel: "创建",
+    fields: [field("名称", name), field("有效时长", duration)],
+    action: async () => { created = await create({ name: name.value, duration: duration.value }); },
+    after: async () => {
+      await refresh();
+      showToken(created.name, created.token);
+    },
+  });
+}
+
+function tokensSection(items, create, remove, reveal, explanation) {
+  return card("Token", { action: addButton("创建 Token", "token-new", () => tokenDialog(create, explanation)) },
+    dataTable(["名称", "创建时间", "到期", "最后使用", "操作"],
+      items.map((t) => [
+        t.name,
+        time(t.created_at),
+        t.expires_at ? time(t.expires_at) : "永久",
+        time(t.last_used),
+        rowActions(
+          rowButton("复制", async () => showToken(t.name, (await reveal(t.id)).token)),
+          rowButton("删除", ask("删除这个 Token？用它的脚本会立即失效。", () => remove(t.id), "已删除", { confirmLabel: "删除" }), { danger: true })),
+      ]),
+      "还没有 Token"));
 }
 
 async function viewTokens() {
@@ -506,86 +511,113 @@ async function viewTokens() {
     "脚本用 Authorization: Bearer 调用接口。权限等同这个工作区的普通管理员，不能增删管理员。");
 }
 
+// Adding and changing an administrator are one dialog; without `admin` it is a new one.
+function adminDialog(admin) {
+  const standing = myWorkspace()?.standing;
+  const username = input({ id: "admin-name", required: true, value: admin?.username ?? "", disabled: !!admin });
+  const role = select({
+    id: "admin-role",
+    value: admin?.role,
+    options: [{ value: "admin", label: "管理员" }, { value: "owner", label: "owner" }],
+  });
+  const password = input({ id: "admin-password", type: "password", autocomplete: "new-password" });
+  const passwordField = admin
+    ? field("新的初始密码", password, { hint: "留空不改。填写后对方下次登录必须修改，当前的登录会被退出。" })
+    : field("初始密码", password, { hint: "首次登录时必须修改" });
+  // Taking over an account another team also uses is the super administrator's call.
+  passwordField.hidden = !!admin?.shared && standing !== "super";
+  const attach = !admin && standing === "super" ? checkbox("使用已有账号（不用填密码）", { id: "admin-attach" }) : null;
+  if (attach) attach.input.onchange = () => { passwordField.hidden = attach.input.checked; };
+  formDialog({
+    title: admin ? "修改管理员" : "添加管理员",
+    confirmLabel: admin ? "保存" : "添加",
+    fields: [field("用户名", username), field("角色", role), passwordField, attach],
+    action: async () => {
+      if (!admin) {
+        const body = { username: username.value, role: role.value };
+        if (!passwordField.hidden) body.password = password.value;
+        await api("POST", wsPath("/admins"), body);
+        return;
+      }
+      if (!passwordField.hidden && password.value) await api("POST", wsPath("/admins/" + admin.user_id + "/password"), { password: password.value });
+      if (role.value !== admin.role) await api("PATCH", wsPath("/admins/" + admin.user_id), { role: role.value });
+    },
+    after: () => { toast(admin ? "已保存" : "已添加", "success"); return refresh(); },
+  });
+}
+
 async function viewAdmins() {
   const items = await api("GET", wsPath("/admins"));
-  const username = input({ id: "admin-name", required: true });
-  const password = input({ id: "admin-password", type: "password", autocomplete: "new-password" });
-  const role = select({ id: "admin-role", options: [{ value: "admin", label: "管理员" }, { value: "owner", label: "owner" }] });
-  const canAttach = myWorkspace()?.standing === "super";
-  const attach = checkbox("使用已有账号（不用填密码）", { id: "admin-attach" });
-  return [
-    card("添加管理员", { hint: "只有 owner 能增删管理员。工作区至少保留一个 owner。" },
-      formOf({ id: "admin-form" }, changes(() => {
-        const body = { username: username.value, role: role.value };
-        if (!canAttach || !attach.input.checked) body.password = password.value;
-        return api("POST", wsPath("/admins"), body);
-      }, "已添加"),
-        field("用户名", username),
-        field("初始密码", password, { hint: "首次登录时必须修改" }),
-        field("角色", role),
-        canAttach ? attach : null,
-        formActions(submitButton("添加")))),
-    card("管理员", {},
-      dataTable(["用户名", "角色", "操作"],
-        items.map((a) => [
-          [a.username, a.shared ? el("span", { class: "muted" }, "（也属于其他工作区）") : null],
-          badge(ROLE[a.role], ROLE_TONE[a.role]),
-          rowActions(
-            rowButton(a.role === "owner" ? "设为管理员" : "设为 owner", changes(() => api("PATCH", wsPath("/admins/" + a.user_id), { role: a.role === "owner" ? "admin" : "owner" }), "已修改")),
-            rowButton("重置密码", askNewPassword(wsPath("/admins/" + a.user_id + "/password"))),
-            rowButton("移除", ask("移除 " + a.username + "？", () => api("DELETE", wsPath("/admins/" + a.user_id)), "已移除", { confirmLabel: "移除" }), { danger: true })),
-        ]),
-        "还没有管理员")),
-  ];
+  return card("管理员", { action: addButton("添加管理员", "admin-new", () => adminDialog()), hint: "只有 owner 能增删管理员。工作区至少保留一个 owner。" },
+    dataTable(["用户名", "角色", "操作"],
+      items.map((a) => [
+        [a.username, a.shared ? el("span", { class: "muted" }, "（也属于其他工作区）") : null],
+        badge(ROLE[a.role], ROLE_TONE[a.role]),
+        rowActions(
+          rowButton("修改", () => adminDialog(a)),
+          rowButton("移除", ask("移除 " + a.username + "？", () => api("DELETE", wsPath("/admins/" + a.user_id)), "已移除", { confirmLabel: "移除" }), { danger: true })),
+      ]),
+      "还没有管理员"));
 }
 
 // ---- System views ----
 
-async function viewWorkspaces() {
-  const all = await api("GET", "workspaces");
-  const name = input({ id: "ws-name", required: true });
-  const cidr = input({ id: "ws-cidr", mono: true, required: true, value: all.suggested_cidr });
+// Creating and changing a workspace are one dialog; without `workspace` it is a new
+// one, and `suggested` is the range to start from.
+function workspaceDialog(workspace, suggested) {
+  const name = input({ id: "ws-name", required: true, value: workspace?.name ?? "" });
+  const cidr = input({ id: "ws-cidr", mono: true, required: true, value: workspace?.cidr ?? suggested });
   const owner = input({ id: "ws-owner", placeholder: "可选" });
   const ownerPassword = input({ id: "ws-owner-password", type: "password", autocomplete: "new-password", placeholder: "首次登录时必须修改" });
-  return [
-    card("创建工作区", { hint: "每个工作区一张组网，相互隔离，网段可以重叠。owner 留空时可以稍后添加；填已有账号且不填密码，会把这个账号加进来。" },
-      formOf({ id: "workspace-form" }, async () => {
-        const body = { name: name.value, cidr: cidr.value };
-        if (owner.value.trim()) {
-          body.owner_username = owner.value;
-          if (ownerPassword.value) body.owner_password = ownerPassword.value;
-        }
-        await api("POST", "workspaces", body);
-        toast("已创建", "success");
-        await boot();
-      },
-        field("名称", name), field("网段（/20 到 /30）", cidr), field("owner 用户名", owner), field("owner 初始密码", ownerPassword),
-        formActions(submitButton("创建")))),
-    card("工作区", {},
-      dataTable(["名称", "网段", "在线", "累计收 / 发", "创建时间", "操作"],
-        all.items.map((w) => [
-          w.name,
-          monoCell(w.cidr),
-          (w.stats?.online ?? 0) + " / " + (w.stats?.capacity ?? 0),
-          bytes(w.stats?.rx_bytes) + " / " + bytes(w.stats?.tx_bytes),
-          time(w.created_at),
-          rowActions(
-            rowButton("改名", askText({ title: "改名", label: "新名称", value: w.name },
-              (value) => api("PATCH", "workspaces/" + w.id, { name: value }), "已改名", boot)),
-            rowButton("改网段", askText({ title: "改网段", message: "所有成员会断开，重连后拿到新地址。", label: "新网段", value: w.cidr },
-              (value) => api("PATCH", "workspaces/" + w.id, { cidr: value }), "已修改网段", boot)),
-            rowButton("删除", askText({
-              title: "删除工作区",
-              message: "删除工作区会断开所有成员，并删除它的 Code、记录和只属于它的账号，不能恢复。",
-              label: "输入工作区名称确认",
-              placeholder: w.name,
-              danger: true,
-              confirmLabel: "删除",
-              ready: (value) => value === w.name,
-            }, () => api("DELETE", "workspaces/" + w.id, {}), "已删除", boot), { danger: true })),
-        ]),
-        "还没有工作区，先创建一个")),
-  ];
+  formDialog({
+    title: workspace ? "修改工作区" : "创建工作区",
+    message: workspace ? null : "每个工作区一张组网，相互隔离，网段可以重叠。owner 留空时可以稍后添加；填已有账号且不填密码，会把这个账号加进来。",
+    confirmLabel: workspace ? "保存" : "创建",
+    fields: [
+      field("名称", name),
+      field("网段（/20 到 /30）", cidr, { hint: workspace ? "改网段时所有成员会断开，重连后拿到新地址" : null }),
+      !workspace && field("owner 用户名", owner),
+      !workspace && field("owner 初始密码", ownerPassword),
+    ],
+    action: async () => {
+      if (workspace) {
+        await api("PATCH", "workspaces/" + workspace.id, { name: name.value, cidr: cidr.value });
+        return;
+      }
+      const body = { name: name.value, cidr: cidr.value };
+      if (owner.value.trim()) {
+        body.owner_username = owner.value;
+        if (ownerPassword.value) body.owner_password = ownerPassword.value;
+      }
+      await api("POST", "workspaces", body);
+    },
+    after: () => { toast(workspace ? "已保存" : "已创建", "success"); return boot(); },
+  });
+}
+
+async function viewWorkspaces() {
+  const all = await api("GET", "workspaces");
+  return card("工作区", { action: addButton("创建工作区", "workspace-new", () => workspaceDialog(undefined, all.suggested_cidr)) },
+    dataTable(["名称", "网段", "在线", "累计收 / 发", "创建时间", "操作"],
+      all.items.map((w) => [
+        w.name,
+        monoCell(w.cidr),
+        (w.stats?.online ?? 0) + " / " + (w.stats?.capacity ?? 0),
+        bytes(w.stats?.rx_bytes) + " / " + bytes(w.stats?.tx_bytes),
+        time(w.created_at),
+        rowActions(
+          rowButton("修改", () => workspaceDialog(w)),
+          rowButton("删除", askText({
+            title: "删除工作区",
+            message: "删除工作区会断开所有成员，并删除它的 Code、记录和只属于它的账号，不能恢复。",
+            label: "输入工作区名称确认",
+            placeholder: w.name,
+            danger: true,
+            confirmLabel: "删除",
+            ready: (value) => value === w.name,
+          }, () => api("DELETE", "workspaces/" + w.id, {}), "已删除", boot), { danger: true })),
+      ]),
+      "还没有工作区，先创建一个"));
 }
 
 async function viewUsers() {
@@ -607,13 +639,10 @@ async function viewUsers() {
 }
 
 function viewGlobalBans() {
-  return [
-    banForm((body) => api("POST", "bans", body),
-      "对所有工作区生效。拉黑的 IP 在 TLS 之前就被丢弃。"),
-    card("全局黑名单", {},
-      list("sbans", (query) => api("GET", "bans?" + query),
-        (items) => banRows(items, (id) => api("DELETE", "bans/" + id)))),
-  ];
+  const add = () => banDialog((body) => api("POST", "bans", body), "对所有工作区生效。拉黑的 IP 在 TLS 之前就被丢弃。");
+  return card("全局黑名单", { action: addButton("添加黑名单", "ban-new", add) },
+    list("sbans", (query) => api("GET", "bans?" + query),
+      (items) => banRows(items, (id) => api("DELETE", "bans/" + id))));
 }
 
 function viewGlobalAudit() {
@@ -637,7 +666,7 @@ async function viewSettings() {
     settings.relay_listening_on
       ? notice("中继正在监听 " + settings.relay_listening_on, "ok")
       : notice("中继没有在监听，请检查监听地址", "warn"),
-    formOf({ id: "settings-form", layout: "stack" }, changes(() => api("PUT", "settings", {
+    formOf({ id: "settings-form" }, changes(() => api("PUT", "settings", {
       public_addr: addr.value, relay_listen: listen.value, history_days: Number(days.value),
     }), "已保存"),
       field("对外地址", addr, { hint: "写进新 Code，已发出的 Code 仍指向旧地址" }),
@@ -646,21 +675,27 @@ async function viewSettings() {
       formActions(submitButton("保存"))));
 }
 
+function sshKeyDialog() {
+  const name = input({ id: "ssh-key-name", placeholder: "留空时用公钥里的备注" });
+  const text = input({ id: "ssh-key-text", mono: true, required: true, placeholder: "ssh-ed25519 AAAA…" });
+  formDialog({
+    title: "添加 SSH 公钥",
+    message: "这里只存公钥，私钥请留在自己手里。",
+    confirmLabel: "添加",
+    fields: [field("名称", name), field("公钥（.pub 文件的内容）", text)],
+    action: () => api("POST", "me/ssh-keys", { name: name.value, public_key: text.value }),
+    after: () => { toast("已添加", "success"); return refresh(); },
+  });
+}
+
 async function viewMe() {
   const [sessions, keys] = await Promise.all([api("GET", "me/sessions"), api("GET", "me/ssh-keys")]);
-  const keyName = input({ id: "ssh-key-name", placeholder: "留空时用公钥里的备注" });
-  const keyText = input({ id: "ssh-key-text", mono: true, required: true, placeholder: "ssh-ed25519 AAAA…" });
-  const password = input({ id: "my-password", type: "password", autocomplete: "new-password" });
+  const changePassword = askText({ title: "修改密码", label: "新密码", type: "password", confirmLabel: "保存" },
+    (password) => api("POST", "me/password", { password }), "已修改，其他登录已退出");
   return [
-    card("修改密码", {},
-      formOf({ id: "my-password-form", layout: "stack" }, changes(() => api("POST", "me/password", { password: password.value }), "已修改，其他登录已退出"),
-        field("新密码", password),
-        formActions(submitButton("保存")))),
-    card("SSH 公钥", { hint: "添加后，复制 Code 时会多出每个公钥的联合 Code。对方粘贴联合 Code 后，持有对应私钥的人能远程控制对方电脑。这里只存公钥，私钥请留在自己手里。" },
-      formOf({ id: "ssh-key-form" }, changes(() => api("POST", "me/ssh-keys", { name: keyName.value, public_key: keyText.value }), "已添加"),
-        field("名称", keyName),
-        field("公钥（.pub 文件的内容）", keyText, { wide: true }),
-        formActions(submitButton("添加"))),
+    card("密码", { action: addButton("修改密码", "my-password", changePassword) },
+      el("p", { class: "muted" }, "修改后，你在其他地方的登录会被退出。")),
+    card("SSH 公钥", { action: addButton("添加公钥", "ssh-key-new", sshKeyDialog), hint: "添加后，复制 Code 时会多出每个公钥的联合 Code。对方粘贴联合 Code 后，持有对应私钥的人能远程控制对方电脑。" },
       dataTable(["名称", "指纹", "添加时间", "操作"],
         keys.map((k) => [
           k.name,

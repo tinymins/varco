@@ -469,17 +469,6 @@ impl Hub {
         Ok(member)
     }
 
-    pub fn revoke_code(
-        &self,
-        workspace: WorkspaceId,
-        id: &str,
-        now: u64,
-    ) -> Result<(), ChangeError> {
-        self.require_store()?.revoke_code(workspace, id, now)?;
-        self.disconnect_code(workspace, id);
-        Ok(())
-    }
-
     pub fn delete_code(&self, workspace: WorkspaceId, id: &str) -> Result<(), ChangeError> {
         self.require_store()?.delete_code(workspace, id)?;
         self.disconnect_code(workspace, id);

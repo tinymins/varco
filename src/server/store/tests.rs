@@ -244,26 +244,25 @@ fn deadlines_can_move_without_affecting_users() {
 }
 
 #[test]
-fn revoking_beats_having_used_the_code() {
-    let store = store("revoke");
+fn deleting_beats_having_used_the_code() {
+    let store = store("delete");
     let ws = workspace(&store, "a");
     let (record, secret) = store.create_code(ws, until(100), "", NOW).unwrap();
     let first = admit(&store, &secret, "c1");
     commit(&first);
     drop(first);
-    store.revoke_code(ws, &record.id, NOW).unwrap();
+    store.delete_code(ws, &record.id).unwrap();
     assert!(store.admit_code(&secret, "c1", NOW).unwrap().is_none());
-    let listed = store.code(ws, &record.id, NOW).unwrap().unwrap();
-    assert_eq!(listed.status, CodeStatus::Revoked);
+    assert!(store.code(ws, &record.id, NOW).unwrap().is_none());
 }
 
 #[test]
-fn commit_is_refused_once_the_code_is_revoked() {
-    let store = store("revoke-pending");
+fn commit_is_refused_once_the_code_is_deleted() {
+    let store = store("delete-pending");
     let ws = workspace(&store, "a");
     let (record, secret) = store.create_code(ws, once(), "", NOW).unwrap();
     let held = admit(&store, &secret, "c1");
-    store.revoke_code(ws, &record.id, NOW).unwrap();
+    store.delete_code(ws, &record.id).unwrap();
     assert!(held
         .reservation
         .as_ref()
@@ -315,7 +314,6 @@ fn ids_from_another_workspace_are_not_found() {
     store.kick(a, "client", "h", NOW).unwrap();
     assert!(store.code(b, &code.id, NOW).unwrap().is_none());
     for result in [
-        store.revoke_code(b, &code.id, NOW),
         store.update_code(b, &code.id, Some("x"), None),
         store.delete_code(b, &code.id),
         store.remove_ban(Some(b), &ban.id),

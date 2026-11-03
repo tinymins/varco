@@ -46,7 +46,7 @@ impl fmt::Display for FailReason {
                 f,
                 "服务器证书与 Code 不符，当前网络可能在拦截加密连接，已中止，Code 未发送"
             ),
-            Self::CredentialRejected => write!(f, "Code 无效或已被撤销"),
+            Self::CredentialRejected => write!(f, "Code 无效或已被删除"),
             Self::CodeUsed => write!(f, "这个 Code 已被使用，如果不是你用的，请告诉管理员"),
             Self::CodeExpired => write!(f, "这个 Code 已过期，请向管理员要新的"),
             Self::Removed => write!(f, "已被管理员移出"),
