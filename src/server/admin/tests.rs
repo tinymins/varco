@@ -159,6 +159,9 @@ const ROUTES: &[(&str, &str, Needs)] = &[
     ("POST", "/api/me/password", Needs::Person),
     ("GET", "/api/me/sessions", Needs::PersonReady),
     ("DELETE", "/api/me/sessions/{id}", Needs::PersonReady),
+    ("GET", "/api/me/ssh-keys", Needs::PersonReady),
+    ("POST", "/api/me/ssh-keys", Needs::PersonReady),
+    ("DELETE", "/api/me/ssh-keys/{id}", Needs::PersonReady),
     ("GET", "/api/settings", Needs::Super),
     ("PUT", "/api/settings", Needs::Super),
     ("GET", "/api/workspaces", Needs::Super),
@@ -175,6 +178,7 @@ const ROUTES: &[(&str, &str, Needs)] = &[
     ("GET", "/api/tokens", Needs::Super),
     ("POST", "/api/tokens", Needs::Super),
     ("DELETE", "/api/tokens/{id}", Needs::Super),
+    ("GET", "/api/tokens/{id}/secret", Needs::Super),
     ("GET", "/api/w/{ws}", Needs::Member),
     ("GET", "/api/w/{ws}/members", Needs::Member),
     ("POST", "/api/w/{ws}/members/kick", Needs::Member),
@@ -185,6 +189,7 @@ const ROUTES: &[(&str, &str, Needs)] = &[
     ("POST", "/api/w/{ws}/codes", Needs::Member),
     ("PATCH", "/api/w/{ws}/codes/{id}", Needs::Member),
     ("DELETE", "/api/w/{ws}/codes/{id}", Needs::Member),
+    ("GET", "/api/w/{ws}/codes/{id}/copies", Needs::Member),
     ("POST", "/api/w/{ws}/codes/{id}/revoke", Needs::Member),
     ("GET", "/api/w/{ws}/bans", Needs::Member),
     ("POST", "/api/w/{ws}/bans", Needs::Member),
@@ -193,6 +198,7 @@ const ROUTES: &[(&str, &str, Needs)] = &[
     ("GET", "/api/w/{ws}/tokens", Needs::Member),
     ("POST", "/api/w/{ws}/tokens", Needs::Member),
     ("DELETE", "/api/w/{ws}/tokens/{id}", Needs::Member),
+    ("GET", "/api/w/{ws}/tokens/{id}/secret", Needs::Member),
     ("GET", "/api/w/{ws}/admins", Needs::Owner),
     ("POST", "/api/w/{ws}/admins", Needs::Owner),
     ("PATCH", "/api/w/{ws}/admins/{user}", Needs::Owner),
@@ -1263,4 +1269,159 @@ async fn health_says_nothing_but_whether_the_relay_listens() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reply, json!({"relay_listening": false}));
+}
+
+const SSH_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl me@host";
+
+#[tokio::test]
+async fn a_code_can_be_copied_again_with_each_of_my_keys() {
+    let h = harness("copy-code");
+    set_public_addr(&h);
+    let codes = format!("/api/w/{}/codes", h.a);
+    let (_, created) = h.as_root(Method::POST, &codes, Some(json!({}))).await;
+    let id = created["id"].as_str().unwrap();
+    let copies_uri = format!("{codes}/{id}/copies");
+
+    let (status, copies) = h.as_root(Method::GET, &copies_uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(copies["code"], created["code"]);
+    assert_eq!(copies["keyed"], json!([]));
+
+    let (status, key) = h
+        .as_root(
+            Method::POST,
+            "/api/me/ssh-keys",
+            Some(json!({"public_key": SSH_KEY})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{key}");
+    assert_eq!(key["name"], "me@host");
+
+    let (_, copies) = h.as_root(Method::GET, &copies_uri, None).await;
+    let plain = Credential::parse(copies["code"].as_str().unwrap()).unwrap();
+    assert!(plain.ssh_pubkey.is_none());
+    let keyed = &copies["keyed"][0];
+    assert_eq!(keyed["name"], "me@host");
+    assert_eq!(keyed["fingerprint"], key["fingerprint"]);
+    let joint = Credential::parse(keyed["code"].as_str().unwrap()).unwrap();
+    assert_eq!(joint.secret, plain.secret);
+    assert!(joint.ssh_pubkey.is_some());
+
+    // A copy follows the server's address, and a token has no keys of its own.
+    h.store()
+        .set_setting(SETTING_PUBLIC_ADDR, "198.51.100.9:443")
+        .unwrap();
+    let token = Credential_::Bearer(h.token(Some(h.a)));
+    let (_, _, copies) = h.send(Method::GET, &copies_uri, &token, None).await;
+    let moved = Credential::parse(copies["code"].as_str().unwrap()).unwrap();
+    assert_eq!(moved.server, "198.51.100.9:443");
+    assert_eq!(moved.secret, plain.secret);
+    assert_eq!(copies["keyed"], json!([]));
+
+    let other = format!("/api/w/{}/codes/{id}/copies", h.b);
+    let (status, _) = h.as_root(Method::GET, &other, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (_, audit) = h
+        .as_root(
+            Method::GET,
+            &format!("/api/w/{}/audit?q=copy_code", h.a),
+            None,
+        )
+        .await;
+    assert!(audit["total"].as_u64().unwrap() >= 3, "{audit}");
+
+    let (status, _) = h
+        .as_root(
+            Method::POST,
+            &format!("{codes}/{id}/revoke"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = h.as_root(Method::GET, &copies_uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_token_can_be_copied_again_and_still_works() {
+    let h = harness("copy-token");
+    let tokens = format!("/api/w/{}/tokens", h.a);
+    let (_, created) = h
+        .as_root(Method::POST, &tokens, Some(json!({"name": "ci"})))
+        .await;
+    let (id, token) = (
+        created["id"].as_str().unwrap(),
+        created["token"].as_str().unwrap(),
+    );
+
+    let (status, copy) = h
+        .as_root(Method::GET, &format!("{tokens}/{id}/secret"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(copy["token"], token);
+
+    let (_, list) = h.as_root(Method::GET, &tokens, None).await;
+    assert!(!list.to_string().contains(token));
+
+    let bearer = Credential_::Bearer(copy["token"].as_str().unwrap().to_owned());
+    let (status, _, _) = h
+        .send(Method::GET, &format!("/api/w/{}", h.a), &bearer, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let elsewhere = format!("/api/w/{}/tokens/{id}/secret", h.b);
+    let (status, _) = h.as_root(Method::GET, &elsewhere, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let global = format!("/api/tokens/{id}/secret");
+    let (status, _) = h.as_root(Method::GET, &global, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn ssh_keys_belong_to_one_person() {
+    let h = harness("ssh-keys");
+    let alice = Credential_::Cookie({
+        let user = h.user(h.a, "alice", Role::Admin);
+        h.session(user)
+    });
+    let bob = Credential_::Cookie({
+        let user = h.user(h.a, "bob", Role::Admin);
+        h.session(user)
+    });
+    let uri = "/api/me/ssh-keys";
+    let add = |name: &str, key: &str| Some(json!({"name": name, "public_key": key}));
+
+    for bad in [
+        "ssh-ed25519 nonsense",
+        "",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+    ] {
+        let (status, _, _) = h.send(Method::POST, uri, &alice, add("", bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (status, _, key) = h
+        .send(Method::POST, uri, &alice, add("laptop", SSH_KEY))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(key["name"], "laptop");
+    // The same key under another comment is still the same key.
+    let renamed = SSH_KEY.replace("me@host", "other@host");
+    let (status, _, _) = h
+        .send(Method::POST, uri, &alice, add("again", &renamed))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = h.send(Method::POST, uri, &bob, add("", SSH_KEY)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let one = format!("{uri}/{}", key["id"].as_str().unwrap());
+    let (status, _, _) = h.send(Method::DELETE, &one, &bob, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, _, mine) = h.send(Method::GET, uri, &alice, None).await;
+    assert_eq!(mine.as_array().unwrap().len(), 1);
+    let (status, _, _) = h.send(Method::DELETE, &one, &alice, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, _, mine) = h.send(Method::GET, uri, &alice, None).await;
+    assert_eq!(mine, json!([]));
 }

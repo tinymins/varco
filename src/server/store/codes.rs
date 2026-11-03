@@ -46,7 +46,7 @@ pub enum CodeStatus {
     Revoked,
 }
 
-/// The Code itself is shown once and never stored.
+/// Leaves out the secret, which is only handed over by [`Store::code_secret`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodeRecord {
     pub id: String,
@@ -231,7 +231,6 @@ impl Store {
         }))
     }
 
-    /// Returns the record and the secret, which exists nowhere else afterwards.
     pub fn create_code(
         &self,
         workspace: WorkspaceId,
@@ -257,11 +256,12 @@ impl Store {
         }
         let id = random_id();
         self.lock().db.execute(
-            "INSERT INTO codes (id, secret_hash, workspace_id, max_uses, expires_at, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO codes (id, secret_hash, secret, workspace_id, max_uses, expires_at, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 id,
                 secret_key(secret),
+                secret,
                 workspace,
                 limits.max_uses,
                 limits.expires_at.map(|at| at as i64),
@@ -279,6 +279,20 @@ impl Store {
             status: status_of(limits, false, 0, now),
             used_by: Vec::new(),
         })
+    }
+
+    /// For copying a Code again. A revoked one is not found: it can never work again.
+    pub fn code_secret(&self, workspace: WorkspaceId, id: &str) -> Result<Secret, ChangeError> {
+        self.lock()
+            .db
+            .query_row(
+                "SELECT secret FROM codes
+                 WHERE workspace_id = ?1 AND id = ?2 AND revoked_at IS NULL",
+                params![workspace, id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(ChangeError::NotFound)
     }
 
     pub fn code(

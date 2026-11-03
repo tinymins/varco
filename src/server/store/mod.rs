@@ -8,8 +8,8 @@ mod records;
 mod tests;
 
 pub use accounts::{
-    hash_password, verify_password, AdminView, ApiToken, Role, SessionView, TokenInfo, User,
-    UserOverview,
+    hash_password, verify_password, AdminView, ApiToken, Role, SessionView, SshKey, TokenInfo,
+    User, UserOverview,
 };
 pub use codes::{
     AdmitError, AdmittedCode, CodeLimits, CodeRecord, CodeStatus, CodeUse, Reservation, UseDetails,
@@ -44,7 +44,7 @@ pub const SETTING_PUBLIC_ADDR: &str = "public_addr";
 pub const SETTING_RELAY_LISTEN: &str = "relay_listen";
 pub const SETTING_HISTORY_DAYS: &str = "history_days";
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = "
 CREATE TABLE settings (
     key TEXT PRIMARY KEY,
@@ -81,15 +81,26 @@ CREATE TABLE sessions (
 CREATE TABLE api_tokens (
     id TEXT PRIMARY KEY,
     token_hash TEXT NOT NULL UNIQUE,
+    token TEXT NOT NULL,
     workspace_id INTEGER REFERENCES workspaces ON DELETE CASCADE,
     name TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     expires_at INTEGER,
     last_used INTEGER
 );
+CREATE TABLE ssh_keys (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (user_id, fingerprint)
+);
 CREATE TABLE codes (
     id TEXT PRIMARY KEY,
     secret_hash TEXT NOT NULL UNIQUE,
+    secret BLOB NOT NULL,
     workspace_id INTEGER NOT NULL REFERENCES workspaces ON DELETE CASCADE,
     max_uses INTEGER,
     expires_at INTEGER,
@@ -507,7 +518,7 @@ pub(crate) fn is_unique_violation(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Holds password and token hashes. The WAL files take the same mode from it.
+/// Holds Codes and API tokens that work as they are. The WAL files take the same mode from it.
 fn restrict_permissions(path: &Path) {
     #[cfg(unix)]
     {

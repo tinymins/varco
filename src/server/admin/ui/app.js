@@ -71,13 +71,13 @@ const ACTIONS = {
   update_settings: "修改服务设置", create_workspace: "创建工作区", update_workspace: "修改工作区", delete_workspace: "删除工作区",
   delete_user: "删除账号", reset_password: "重置密码", add_admin: "添加管理员", remove_admin: "移除管理员", set_role: "修改角色",
   create_code: "生成 Code", update_code: "修改 Code", revoke_code: "撤销 Code", delete_code: "删除 Code",
+  copy_code: "复制 Code", copy_token: "复制 Token", add_ssh_key: "添加 SSH 公钥", delete_ssh_key: "删除 SSH 公钥",
   kick: "踢出", unkick: "解除踢出", add_ban: "拉黑", remove_ban: "解除拉黑", create_token: "创建 Token", delete_token: "删除 Token",
 };
 
 let me = null;
 let pages = {};
 let current = { scope: null, tab: null };
-let revealed = {};
 let poll = null;
 
 const wsPath = (path = "") => "w/" + current.scope + path;
@@ -93,7 +93,7 @@ function show(...nodes) {
 
 function showLogin() {
   stopPolling();
-  me = null; pages = {}; revealed = {}; current = { scope: null, tab: null };
+  me = null; pages = {}; current = { scope: null, tab: null };
   const user = input({ autocomplete: "username", required: true });
   const pass = input({ type: "password", autocomplete: "current-password" });
   show(authPage("varco 管理后台", null,
@@ -184,7 +184,6 @@ function tabsFor() {
 function switchScope(scope) {
   current = { scope, tab: null };
   pages = {};
-  revealed = {};
   drawApp();
 }
 
@@ -272,7 +271,7 @@ async function viewMembers() {
       stat(overview.workspace.name + " · " + overview.workspace.cidr, (summary.online ?? 0) + " / " + (summary.capacity ?? 0), "在线"),
       stat("累计收发（重启后清零）", bytes(summary.rx_bytes) + " / " + bytes(summary.tx_bytes))),
     card("在线成员", { hint: "踢出：断开并结束这次运行，对方重开程序后，只要 Code 还有效就能回来。要彻底拦住，请撤销 Code 并拉黑设备。" },
-      dataTable(["主机名", "虚拟 IP", "来源 IP", "设备", "Code", "上线时间", "收 / 发", ""],
+      dataTable(["主机名", "虚拟 IP", "来源 IP", "设备", "Code", "上线时间", "收 / 发", "操作"],
         page.items.map((m) => [
           m.hostname,
           monoCell(m.ip),
@@ -288,7 +287,7 @@ async function viewMembers() {
         ]),
         "现在没有人在线")),
     kicked.length ? card("已踢出", { hint: "记录保留 7 天。解除后，那次运行如果还开着，会自动连回来。" },
-      dataTable(["主机名", "时间", ""], kicked.map((k) => [
+      dataTable(["主机名", "时间", "操作"], kicked.map((k) => [
         k.hostname,
         time(k.at),
         rowActions(rowButton("解除", changes(() => api("DELETE", wsPath("/kicked/" + encodeURIComponent(k.client))), "已解除"))),
@@ -303,8 +302,18 @@ function limitText(code) {
   return parts.join("，") || "永久";
 }
 
+async function showCodeCopies(id) {
+  const copies = await api("GET", wsPath("/codes/" + id + "/copies"));
+  sheet({ title: "复制 Code" },
+    secretRow({ label: "默认 Code", hint: "只入网", secret: copies.code }),
+    copies.keyed.length
+      ? notice("联合 Code 让对方粘贴后入网并开启 SSH，持有对应私钥的人能远程控制对方电脑，只发给知情并同意的人。", "warn")
+      : el("p", { class: "muted" }, "在“我的账号设置”里添加 SSH 公钥后，这里会多出对应的联合 Code。"),
+    copies.keyed.map((key) => secretRow({ label: "联合 Code：" + key.name, hint: key.fingerprint, secret: key.code })));
+}
+
 function codeRows(items) {
-  return dataTable(["ID", "限制", "状态", "备注", "使用者", "创建时间", ""],
+  return dataTable(["ID", "限制", "状态", "备注", "使用者", "创建时间", "操作"],
     items.map((c) => [
       monoCell(short(c.id), c.id),
       limitText(c),
@@ -313,6 +322,7 @@ function codeRows(items) {
       cell(c.used_by.length ? c.used_by.map((u) => u.hostname + "（" + u.peer + "）").join("，") : "—", { wrap: true }),
       time(c.created_at),
       rowActions(
+        c.status !== "revoked" && rowButton("复制", () => showCodeCopies(c.id)),
         rowButton("改备注", askText({ title: "改备注", label: "备注", value: c.note }, (note) => api("PATCH", wsPath("/codes/" + c.id), { note }), "已保存")),
         c.expires_at && rowButton("改期限", askText({
           title: "改期限", message: "不影响已连接的设备。", label: "从现在起的有效时长，如 30m、24h、7d", value: "24h",
@@ -340,9 +350,6 @@ function viewCodes() {
   const durationField = field("有效时长", duration);
   const maxField = field("最多使用次数", maxUses, { hint: "每次运行算一次" });
   const note = input({ id: "code-note", placeholder: "发给谁、做什么用" });
-  const ssh = input({ id: "code-ssh", mono: true, placeholder: "ssh-ed25519 AAAA…" });
-  const showCode = () => revealed.code ? secretReveal("Code 只显示这一次，请现在复制。", revealed.code.text, revealed.code.key) : "";
-  const slot = el("div", {}, showCode());
   function sync() {
     const choice = CODE_KINDS[kind.value];
     durationField.hidden = !choice.duration;
@@ -354,30 +361,25 @@ function viewCodes() {
   drawList();
   const form = formOf({ id: "code-form" }, async () => {
     const choice = CODE_KINDS[kind.value];
-    const body = { note: note.value, ssh_pubkey: ssh.value };
+    const body = { note: note.value };
     if (choice.duration) body.duration = duration.value;
     if (choice.max === true) body.max_uses = Number(maxUses.value);
     else if (choice.max) body.max_uses = choice.max;
     const created = await api("POST", wsPath("/codes"), body);
-    revealed.code = {
-      text: created.code,
-      key: created.key_fingerprint ? "可远程控制的公钥：" + created.key_fingerprint : null,
-    };
-    slot.replaceChildren(showCode());
-    note.value = ""; ssh.value = "";
+    note.value = "";
     drawList();
+    await showCodeCopies(created.id);
   },
     field("类型", kind), durationField, maxField, field("备注", note),
-    field("SSH 公钥（可选）", ssh, { wide: true, hint: "对方确认后持有私钥的人能远程控制对方电脑" }),
     formActions(submitButton("生成")));
   return [
-    card("生成 Code", {}, form, slot),
+    card("生成 Code", {}, form),
     card("已生成的 Code", {}, holder),
   ];
 }
 
 function banRows(items, remove) {
-  return dataTable(["类型", "内容", "备注", "到期", "时间", ""],
+  return dataTable(["类型", "内容", "备注", "到期", "时间", "操作"],
     items.map((b) => [
       b.kind === "ip" ? "IP" : "设备",
       monoCell(b.kind === "ip" ? b.value : short(b.value), b.value),
@@ -447,27 +449,32 @@ function viewAudit() {
     list("audit", (query) => api("GET", wsPath("/audit?" + query)), auditRows));
 }
 
-function tokensSection(items, create, remove, explanation) {
+function showToken(name, token) {
+  sheet({ title: "复制 Token" }, secretRow({ label: name, secret: token }));
+}
+
+function tokensSection(items, create, remove, reveal, explanation) {
   const name = input({ id: "token-name", required: true, placeholder: "用途，如 ci" });
   const duration = input({ id: "token-duration", placeholder: "留空为永久，或 30m、24h、7d" });
   return [
     card("创建 Token", { hint: explanation },
       formOf({ id: "token-form" }, async () => {
         const created = await create({ name: name.value, duration: duration.value });
-        revealed.token = created.token;
         await refresh();
+        showToken(created.name, created.token);
       },
         field("名称", name), field("有效时长", duration),
-        formActions(submitButton("创建"))),
-      revealed.token ? secretReveal("Token 只显示这一次，请现在复制。", revealed.token) : null),
+        formActions(submitButton("创建")))),
     card("Token", {},
-      dataTable(["名称", "创建时间", "到期", "最后使用", ""],
+      dataTable(["名称", "创建时间", "到期", "最后使用", "操作"],
         items.map((t) => [
           t.name,
           time(t.created_at),
           t.expires_at ? time(t.expires_at) : "永久",
           time(t.last_used),
-          rowActions(rowButton("删除", ask("删除这个 Token？用它的脚本会立即失效。", () => remove(t.id), "已删除", { confirmLabel: "删除" }), { danger: true })),
+          rowActions(
+            rowButton("复制", async () => showToken(t.name, (await reveal(t.id)).token)),
+            rowButton("删除", ask("删除这个 Token？用它的脚本会立即失效。", () => remove(t.id), "已删除", { confirmLabel: "删除" }), { danger: true })),
         ]),
         "还没有 Token")),
   ];
@@ -476,6 +483,7 @@ function tokensSection(items, create, remove, explanation) {
 async function viewTokens() {
   const items = await api("GET", wsPath("/tokens"));
   return tokensSection(items, (body) => api("POST", wsPath("/tokens"), body), (id) => api("DELETE", wsPath("/tokens/" + id)),
+    (id) => api("GET", wsPath("/tokens/" + id + "/secret")),
     "脚本用 Authorization: Bearer 调用接口。权限等同这个工作区的普通管理员，不能增删管理员。");
 }
 
@@ -499,7 +507,7 @@ async function viewAdmins() {
         canAttach ? attach : null,
         formActions(submitButton("添加")))),
     card("管理员", {},
-      dataTable(["用户名", "角色", ""],
+      dataTable(["用户名", "角色", "操作"],
         items.map((a) => [
           [a.username, a.shared ? el("span", { class: "muted" }, "（也属于其他工作区）") : null],
           badge(ROLE[a.role], ROLE_TONE[a.role]),
@@ -535,7 +543,7 @@ async function viewWorkspaces() {
         field("名称", name), field("网段（/20 到 /30）", cidr), field("owner 用户名", owner), field("owner 初始密码", ownerPassword),
         formActions(submitButton("创建")))),
     card("工作区", {},
-      dataTable(["名称", "网段", "在线", "累计收 / 发", "创建时间", ""],
+      dataTable(["名称", "网段", "在线", "累计收 / 发", "创建时间", "操作"],
         all.items.map((w) => [
           w.name,
           monoCell(w.cidr),
@@ -565,7 +573,7 @@ async function viewUsers() {
   const [users, workspaces] = await Promise.all([api("GET", "users"), api("GET", "workspaces")]);
   const nameOf = (id) => workspaces.items.find((w) => w.id === id)?.name ?? "?";
   return card("账号", { hint: "普通账号在工作区的“管理员”页添加。" },
-    dataTable(["用户名", "身份", "工作区", "待改密码", "创建时间", ""],
+    dataTable(["用户名", "身份", "工作区", "待改密码", "创建时间", "操作"],
       users.map((u) => [
         u.username,
         u.is_super ? "超管" : "管理员",
@@ -597,6 +605,7 @@ function viewGlobalAudit() {
 async function viewGlobalTokens() {
   const items = await api("GET", "tokens");
   return tokensSection(items, (body) => api("POST", "tokens", body), (id) => api("DELETE", "tokens/" + id),
+    (id) => api("GET", "tokens/" + id + "/secret"),
     "权限等同超管，可以访问 /metrics。请妥善保管。");
 }
 
@@ -619,15 +628,30 @@ async function viewSettings() {
 }
 
 async function viewMe() {
-  const sessions = await api("GET", "me/sessions");
+  const [sessions, keys] = await Promise.all([api("GET", "me/sessions"), api("GET", "me/ssh-keys")]);
+  const keyName = input({ id: "ssh-key-name", placeholder: "留空时用公钥里的备注" });
+  const keyText = input({ id: "ssh-key-text", mono: true, required: true, placeholder: "ssh-ed25519 AAAA…" });
   const password = input({ id: "my-password", type: "password", autocomplete: "new-password" });
   return [
     card("修改密码", {},
       formOf({ id: "my-password-form", layout: "stack" }, changes(() => api("POST", "me/password", { password: password.value }), "已修改，其他登录已退出"),
         field("新密码", password),
         formActions(submitButton("保存")))),
+    card("SSH 公钥", { hint: "添加后，复制 Code 时会多出每个公钥的联合 Code。对方粘贴联合 Code 后，持有对应私钥的人能远程控制对方电脑。这里只存公钥，私钥请留在自己手里。" },
+      formOf({ id: "ssh-key-form" }, changes(() => api("POST", "me/ssh-keys", { name: keyName.value, public_key: keyText.value }), "已添加"),
+        field("名称", keyName),
+        field("公钥（.pub 文件的内容）", keyText, { wide: true }),
+        formActions(submitButton("添加"))),
+      dataTable(["名称", "指纹", "添加时间", "操作"],
+        keys.map((k) => [
+          k.name,
+          monoCell(k.fingerprint),
+          time(k.created_at),
+          rowActions(rowButton("删除", ask("删除公钥 " + k.name + "？已经发出去的联合 Code 不受影响。", () => api("DELETE", "me/ssh-keys/" + k.id), "已删除", { confirmLabel: "删除" }), { danger: true })),
+        ]),
+        "还没有添加公钥")),
     card("登录中的会话", {},
-      dataTable(["设备", "登录时间", "最近活动", ""],
+      dataTable(["设备", "登录时间", "最近活动", "操作"],
         sessions.map((s) => [
           cell(s.user_agent || "—", { wrap: true }),
           time(s.created_at),

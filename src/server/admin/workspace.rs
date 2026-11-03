@@ -1,6 +1,6 @@
 //! What can be done inside one workspace. Every handler takes a [`Scoped`], and
 //! every store call is passed its workspace id.
-use super::{ApiError, ApiResult, Console, OwnerScoped, PageParams, Scoped, Standing};
+use super::{internal, ApiError, ApiResult, Console, OwnerScoped, PageParams, Scoped, Standing};
 use crate::core::device;
 use crate::core::ssh::store as ssh_store;
 use crate::credential::Credential;
@@ -140,6 +140,18 @@ pub async fn codes(
     )?))
 }
 
+fn public_addr(console: &Console) -> ApiResult<String> {
+    console
+        .store()
+        .setting(SETTING_PUBLIC_ADDR)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "服务还没有设置对外地址，请超管先完成服务设置",
+            )
+        })
+}
+
 #[derive(Deserialize)]
 pub struct NewCode {
     max_uses: Option<u32>,
@@ -166,12 +178,7 @@ pub async fn create_code(
 ) -> ApiResult<Json<CreatedCode>> {
     let now = unix_now();
     let store = console.store();
-    let public_addr = store.setting(SETTING_PUBLIC_ADDR)?.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "服务还没有设置对外地址，请超管先完成服务设置",
-        )
-    })?;
+    let server = public_addr(&console)?;
     let limits = CodeLimits {
         max_uses: body.max_uses,
         expires_at: deadline(body.duration.as_deref(), now)?,
@@ -187,7 +194,7 @@ pub async fn create_code(
     let id = scoped.workspace.id;
     let (record, secret) = store.create_code(id, limits, &body.note, now)?;
     let credential = Credential {
-        server: public_addr,
+        server,
         pin: console.pin,
         secret,
         ssh_pubkey: None,
@@ -201,6 +208,57 @@ pub async fn create_code(
         code: credential.encode(),
         record,
         key_fingerprint,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct KeyedCode {
+    name: String,
+    fingerprint: String,
+    code: String,
+}
+
+/// The Code as it is, and once for each of the caller's own SSH keys. A token
+/// belongs to nobody, so it only gets the first.
+#[derive(Serialize)]
+pub struct CodeCopies {
+    code: String,
+    keyed: Vec<KeyedCode>,
+}
+
+pub async fn code_copies(
+    State(console): State<Arc<Console>>,
+    scoped: Scoped,
+    Path((_, code)): Path<(WorkspaceId, String)>,
+) -> ApiResult<Json<CodeCopies>> {
+    let id = scoped.workspace.id;
+    let store = console.store();
+    // The address as it is now, so a Code copied after it changed still connects.
+    let credential = Credential {
+        server: public_addr(&console)?,
+        pin: console.pin,
+        secret: store.code_secret(id, &code)?,
+        ssh_pubkey: None,
+    };
+    let keys = match scoped.actor.user {
+        Some(user) => store.ssh_keys(user)?,
+        None => Vec::new(),
+    };
+    let keyed = keys
+        .into_iter()
+        .map(|key| {
+            let parsed = ssh_store::parse_public_key(&key.public_key).map_err(internal)?;
+            Ok(KeyedCode {
+                name: key.name,
+                fingerprint: key.fingerprint,
+                code: credential.clone().with_ssh_pubkey(parsed).encode(),
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    console.audit(&scoped.actor, Some(id), "copy_code", &code);
+    Ok(Json(CodeCopies {
+        code: credential.encode(),
+        keyed,
     }))
 }
 
@@ -339,7 +397,6 @@ pub struct NewToken {
     pub(super) duration: Option<String>,
 }
 
-/// The token is in this response and nowhere else.
 #[derive(Serialize)]
 pub struct CreatedToken {
     pub(super) token: String,
@@ -363,6 +420,22 @@ pub async fn create_token(
         token: created.token,
         info: created.info,
     }))
+}
+
+#[derive(Serialize)]
+pub struct TokenSecret {
+    pub(super) token: String,
+}
+
+pub async fn token_secret(
+    State(console): State<Arc<Console>>,
+    scoped: Scoped,
+    Path((_, token)): Path<(WorkspaceId, String)>,
+) -> ApiResult<Json<TokenSecret>> {
+    let id = scoped.workspace.id;
+    let secret = console.store().token_secret(Some(id), &token)?;
+    console.audit(&scoped.actor, Some(id), "copy_token", &token);
+    Ok(Json(TokenSecret { token: secret }))
 }
 
 pub async fn delete_token(

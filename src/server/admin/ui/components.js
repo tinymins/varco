@@ -435,6 +435,30 @@ function dialog({ title, message, control, confirmLabel = "确定", danger, read
   }
 }
 
+// For reading and copying: nothing to confirm, so the only button closes it.
+function sheet({ title }, ...body) {
+  closeOverlays();
+  function close() {
+    node.close();
+    node.remove();
+    activeDialog = null;
+  }
+  const node = el("dialog", {
+    class: "dialog dialog-wide",
+    oncancel: (event) => {
+      event.preventDefault();
+      close();
+    },
+    onclick: (event) => { if (event.target === node) close(); },
+  }, el("div", { class: "dialog-form" },
+    el("h2", { class: "dialog-title" }, title),
+    ...body,
+    el("div", { class: "dialog-actions" }, button("关闭", { onclick: close }))));
+  document.body.append(node);
+  node.showModal();
+  activeDialog = { close };
+}
+
 function closeOverlays() {
   closeFloating();
   activeDialog?.close();
@@ -495,7 +519,7 @@ function rowActions(...buttons) {
 function dataTable(headers, rows, empty) {
   if (!rows.length) return emptyState(empty);
   return el("div", { class: "table-wrap" }, el("table", { class: "table" },
-    el("thead", {}, el("tr", {}, headers.map((header) => el("th", {}, header)))),
+    el("thead", {}, el("tr", {}, headers.map((header) => el("th", { class: header === "操作" ? "th-actions" : null }, header)))),
     el("tbody", {}, rows.map((row) => el("tr", {},
       row.map((content) => content instanceof HTMLTableCellElement ? content : el("td", {}, content)))))));
 }
@@ -537,23 +561,32 @@ function pagedList(state, load, render) {
   return el("div", {}, el("div", { class: "toolbar" }, search), body, pager);
 }
 
-// ---- One-off secrets ----
+// ---- Secrets to copy ----
 
-// Stays on screen until someone leaves the page or logs out.
-function secretReveal(title, secret, extra) {
-  const code = el("code", { class: "mono" }, secret);
-  return el("div", { class: "reveal" },
-    el("strong", {}, title),
-    code,
-    extra && el("div", { class: "mono" }, extra),
-    el("div", {}, button("复制", { size: "sm", icon: "copy", onclick: async () => {
-      try {
-        await navigator.clipboard.writeText(secret);
-        toast("已复制", "success");
-      } catch {
-        // The clipboard API needs HTTPS; selecting the text still lets it be copied.
-        getSelection().selectAllChildren(code);
-        toast("无法自动复制，已选中，请手动复制");
-      }
-    } })));
+// The clipboard API needs HTTPS, and the console may be reached over plain HTTP.
+async function copyText(text, node) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    getSelection().selectAllChildren(node);
+    return document.execCommand("copy");
+  }
+}
+
+// Says what happened on the button itself: a toast would sit behind an open dialog.
+function secretRow({ label, hint, secret }) {
+  const text = el("code", { class: "secret-text mono" }, secret);
+  let timer;
+  const copy = button("复制", { size: "sm", icon: "copy", onclick: async () => {
+    const copied = await copyText(secret, text);
+    copy.lastChild.textContent = copied ? "已复制" : "已选中，请手动复制";
+    clearTimeout(timer);
+    timer = setTimeout(() => { copy.lastChild.textContent = "复制"; }, 2000);
+  } });
+  return el("div", { class: "secret-row" },
+    el("div", { class: "secret-head" },
+      el("div", { class: "secret-label" }, el("strong", {}, label), hint && el("span", { class: "secret-hint mono" }, hint)),
+      copy),
+    text);
 }

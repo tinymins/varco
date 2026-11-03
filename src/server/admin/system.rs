@@ -1,5 +1,5 @@
 //! What only the super administrator can do, plus health and metrics.
-use super::workspace::{ban_target, deadline, CreatedToken, NewBan, NewToken};
+use super::workspace::{ban_target, deadline, CreatedToken, NewBan, NewToken, TokenSecret};
 use super::{ApiError, ApiResult, Console, PageParams, SuperOnly};
 use crate::server::hub::NetworkStats;
 use crate::server::store::{
@@ -345,6 +345,16 @@ pub async fn create_global_token(
         token: created.token,
         info: created.info,
     }))
+}
+
+pub async fn global_token_secret(
+    State(console): State<Arc<Console>>,
+    SuperOnly(actor): SuperOnly,
+    Path(id): Path<String>,
+) -> ApiResult<Json<TokenSecret>> {
+    let token = console.store().token_secret(None, &id)?;
+    console.audit(&actor, None, "copy_token", &id);
+    Ok(Json(TokenSecret { token }))
 }
 
 pub async fn delete_global_token(

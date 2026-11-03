@@ -159,6 +159,7 @@ p { margin: 0; }
   width: min(440px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: var(--radius-l);
   background: var(--surface); color: var(--text); box-shadow: var(--shadow-float);
 }
+.dialog-wide { width: min(640px, calc(100vw - 32px)); }
 .dialog::backdrop { background: rgb(20 19 15 / 45%); }
 .dialog-form { display: grid; gap: 12px; padding: 20px; }
 .dialog-title { margin: 0; font-size: 16px; font-weight: 600; }
@@ -231,8 +232,14 @@ main > * { min-width: 0; }
 .notice-ok { background: var(--ok-tint); color: var(--ok); }
 .notice-warn { background: var(--warn-bg); color: var(--warn-text); }
 
-.reveal { display: grid; gap: 8px; margin-top: 16px; padding: 12px; border: 1px solid var(--warn-line); border-radius: var(--radius-m); background: var(--warn-bg); color: var(--warn-text); }
-.reveal code { display: block; padding: 8px 10px; border-radius: var(--radius-s); background: var(--surface); color: var(--text); word-break: break-all; }
+.dialog-form .notice { margin: 0; }
+.form-grid + .table-wrap, .form-grid + .empty { margin-top: 16px; }
+.secret-row { display: grid; gap: 6px; min-width: 0; }
+.secret-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.secret-label { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.secret-hint { color: var(--muted); font-size: 12px; }
+.secret-head .btn { flex: none; }
+.secret-text { display: block; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface-2); word-break: break-all; font-size: 13px; }
 
 /* ---- Tables ---- */
 .table-wrap { overflow-x: auto; margin-inline: -16px; }
@@ -245,6 +252,7 @@ main > * { min-width: 0; }
 .table tbody tr:hover { background: var(--surface-2); }
 .table tbody tr:last-child td { border-bottom: 0; }
 .cell-wrap { white-space: normal !important; min-width: 140px; }
+.th-actions { text-align: right !important; }
 .cell-actions { width: 1%; padding-block: 4px !important; }
 .row-actions { display: flex; justify-content: flex-end; gap: 2px; }
 

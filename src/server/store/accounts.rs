@@ -97,6 +97,16 @@ pub struct TokenInfo {
     pub last_used: Option<u64>,
 }
 
+/// A public key someone keeps on their account, for Codes that carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SshKey {
+    pub id: String,
+    pub name: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub created_at: u64,
+}
+
 pub struct ApiToken {
     pub info: TokenInfo,
     pub token: String,
@@ -504,6 +514,67 @@ impl Store {
         Ok(())
     }
 
+    // ---- SSH public keys ----
+
+    pub fn ssh_keys(&self, user: UserId) -> rusqlite::Result<Vec<SshKey>> {
+        let inner = self.lock();
+        let mut statement = inner.db.prepare(
+            "SELECT id, name, public_key, fingerprint, created_at
+             FROM ssh_keys WHERE user_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map([user], |row| {
+            Ok(SshKey {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                public_key: row.get(2)?,
+                fingerprint: row.get(3)?,
+                created_at: row.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn add_ssh_key(
+        &self,
+        user: UserId,
+        name: &str,
+        public_key: &str,
+        fingerprint: &str,
+        now: u64,
+    ) -> Result<SshKey, ChangeError> {
+        let id = random_id();
+        let inserted = self.lock().db.execute(
+            "INSERT INTO ssh_keys (id, user_id, name, public_key, fingerprint, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, user, name, public_key, fingerprint, now as i64],
+        );
+        match inserted {
+            Ok(_) => Ok(SshKey {
+                id,
+                name: name.to_owned(),
+                public_key: public_key.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                created_at: now,
+            }),
+            Err(error) if is_unique_violation(&error) => {
+                Err(ChangeError::Conflict("已经添加过这个公钥".to_owned()))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Scoped to the user, so someone else's key is simply not found.
+    pub fn delete_ssh_key(&self, user: UserId, id: &str) -> Result<(), ChangeError> {
+        let affected = self.lock().db.execute(
+            "DELETE FROM ssh_keys WHERE user_id = ?1 AND id = ?2",
+            params![user, id],
+        )?;
+        if affected == 0 {
+            return Err(ChangeError::NotFound);
+        }
+        Ok(())
+    }
+
     // ---- API tokens ----
 
     pub fn create_token(
@@ -516,11 +587,12 @@ impl Store {
         let id = random_id();
         let token = format!("varco_{}", hex(&generate_secret()));
         self.lock().db.execute(
-            "INSERT INTO api_tokens (id, token_hash, workspace_id, name, created_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO api_tokens (id, token_hash, token, workspace_id, name, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id,
                 client_key(&token),
+                token,
                 workspace,
                 name,
                 now as i64,
@@ -557,6 +629,23 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+
+    /// For copying a token again.
+    pub fn token_secret(
+        &self,
+        workspace: Option<WorkspaceId>,
+        id: &str,
+    ) -> Result<String, ChangeError> {
+        self.lock()
+            .db
+            .query_row(
+                "SELECT token FROM api_tokens WHERE workspace_id IS ?1 AND id = ?2",
+                params![workspace, id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(ChangeError::NotFound)
     }
 
     pub fn delete_token(

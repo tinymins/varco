@@ -3,8 +3,9 @@ use super::{
     bearer_token, cookie_token, internal, source_of, Access, Actor, ApiError, ApiResult, Authed,
     Console, Person, Signed, Standing, COOKIE_NAME, SESSION_LIFETIME_SECS,
 };
+use crate::core::ssh::store as ssh_store;
 use crate::server::store::{
-    unix_now, verify_password, Role, SessionView, WorkspaceId, SETTING_PUBLIC_ADDR,
+    unix_now, verify_password, Role, SessionView, SshKey, WorkspaceId, SETTING_PUBLIC_ADDR,
 };
 use axum::extract::{Path, State};
 use axum::http::header::{SET_COOKIE, USER_AGENT};
@@ -230,5 +231,58 @@ pub async fn end_session(
     let user = actor.user.ok_or_else(ApiError::forbidden)?;
     console.store().close_session_by_id(user, &id)?;
     console.audit(&actor, None, "end_session", &id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn ssh_keys(
+    State(console): State<Arc<Console>>,
+    Authed(actor): Authed,
+) -> ApiResult<Json<Vec<SshKey>>> {
+    let user = actor.user.ok_or_else(ApiError::forbidden)?;
+    Ok(Json(console.store().ssh_keys(user)?))
+}
+
+#[derive(Deserialize)]
+pub struct NewSshKey {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    public_key: String,
+}
+
+/// Without a name, the key's own comment is what its owner will recognise it by.
+pub async fn add_ssh_key(
+    State(console): State<Arc<Console>>,
+    Authed(actor): Authed,
+    Json(body): Json<NewSshKey>,
+) -> ApiResult<Json<SshKey>> {
+    let user = actor.user.ok_or_else(ApiError::forbidden)?;
+    let key = ssh_store::parse_public_key(&body.public_key)
+        .map_err(|detail| ApiError::bad_request(detail.to_string()))?;
+    let fingerprint = ssh_store::fingerprint(&key);
+    let name = match body.name.trim() {
+        "" if key.comment().is_empty() => fingerprint.clone(),
+        "" => key.comment().to_string(),
+        name => name.to_owned(),
+    };
+    let added = console.store().add_ssh_key(
+        user,
+        &name,
+        body.public_key.trim(),
+        &fingerprint,
+        unix_now(),
+    )?;
+    console.audit(&actor, None, "add_ssh_key", &fingerprint);
+    Ok(Json(added))
+}
+
+pub async fn delete_ssh_key(
+    State(console): State<Arc<Console>>,
+    Authed(actor): Authed,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let user = actor.user.ok_or_else(ApiError::forbidden)?;
+    console.store().delete_ssh_key(user, &id)?;
+    console.audit(&actor, None, "delete_ssh_key", &id);
     Ok(StatusCode::NO_CONTENT)
 }

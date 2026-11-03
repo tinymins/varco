@@ -398,11 +398,11 @@ fn bans_can_expire_and_be_set_again() {
 }
 
 #[test]
-fn state_survives_a_restart_and_holds_no_plain_credentials() {
+fn state_survives_a_restart_and_keeps_only_codes_and_tokens_readable() {
     let path = db_path("reload");
     let store = Arc::new(Store::open(&path).unwrap());
     let ws = workspace(&store, "a");
-    let (_, secret) = store.create_code(ws, once(), "", NOW).unwrap();
+    let (record, secret) = store.create_code(ws, once(), "", NOW).unwrap();
     let used = admit(&store, &secret, "plain-client-id");
     commit(&used);
     drop(used);
@@ -435,12 +435,7 @@ fn state_survives_a_restart_and_holds_no_plain_credentials() {
     let bytes = std::fs::read(&path).unwrap();
     let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
     assert!(!contains(b"plain-client-id"));
-    assert!(!contains(token.token.as_bytes()));
     assert!(!contains(session.as_bytes()));
-    assert!(!contains(
-        crate::credential::encode_secret(&secret).as_bytes()
-    ));
-    assert!(!contains(&secret));
 
     let reloaded = Arc::new(Store::open(&path).unwrap());
     assert_eq!(
@@ -456,6 +451,12 @@ fn state_survives_a_restart_and_holds_no_plain_credentials() {
     assert!(reloaded.globally_banned_ip("198.51.100.9".parse().unwrap(), NOW));
     assert!(reloaded.session_user(&session, NOW).unwrap().is_some());
     assert!(reloaded.token_info(&token.token, NOW).unwrap().is_some());
+    // Kept so they can be copied again.
+    assert_eq!(reloaded.code_secret(ws, &record.id).unwrap(), secret);
+    assert_eq!(
+        reloaded.token_secret(None, &token.info.id).unwrap(),
+        token.token
+    );
 }
 
 #[test]

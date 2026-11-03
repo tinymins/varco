@@ -471,7 +471,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
     let mut set = |name, value: &'static str| {
         headers.insert(name, HeaderValue::from_static(value));
     };
-    // Responses can carry a Code that is shown only once.
+    // Responses can carry a Code or a token.
     set(CACHE_CONTROL, "no-store");
     set(CONTENT_SECURITY_POLICY, CSP);
     set(REFERRER_POLICY, "no-referrer");
@@ -521,6 +521,11 @@ pub fn router(console: Arc<Console>) -> Router {
             "/api/me/sessions/{id}",
             axum::routing::delete(a::end_session),
         )
+        .route("/api/me/ssh-keys", get(a::ssh_keys).post(a::add_ssh_key))
+        .route(
+            "/api/me/ssh-keys/{id}",
+            axum::routing::delete(a::delete_ssh_key),
+        )
         .route("/api/settings", get(s::settings).put(s::update_settings))
         .route(
             "/api/workspaces",
@@ -547,6 +552,7 @@ pub fn router(console: Arc<Console>) -> Router {
             "/api/tokens/{id}",
             axum::routing::delete(s::delete_global_token),
         )
+        .route("/api/tokens/{id}/secret", get(s::global_token_secret))
         .route("/api/w/{ws}", get(w::overview))
         .route("/api/w/{ws}/members", get(w::members))
         .route("/api/w/{ws}/members/kick", post(w::kick))
@@ -561,6 +567,7 @@ pub fn router(console: Arc<Console>) -> Router {
             "/api/w/{ws}/codes/{id}",
             patch(w::update_code).delete(w::delete_code),
         )
+        .route("/api/w/{ws}/codes/{id}/copies", get(w::code_copies))
         .route("/api/w/{ws}/codes/{id}/revoke", post(w::revoke_code))
         .route("/api/w/{ws}/bans", get(w::bans).post(w::add_ban))
         .route(
@@ -573,6 +580,7 @@ pub fn router(console: Arc<Console>) -> Router {
             "/api/w/{ws}/tokens/{id}",
             axum::routing::delete(w::delete_token),
         )
+        .route("/api/w/{ws}/tokens/{id}/secret", get(w::token_secret))
         .route("/api/w/{ws}/admins", get(w::admins).post(w::add_admin))
         .route(
             "/api/w/{ws}/admins/{user}",
