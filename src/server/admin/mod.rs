@@ -487,6 +487,13 @@ async fn script() -> impl IntoResponse {
     )
 }
 
+async fn components() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("ui/components.js"),
+    )
+}
+
 async fn stylesheet() -> impl IntoResponse {
     (
         [(CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -501,6 +508,7 @@ pub fn router(console: Arc<Console>) -> Router {
     Router::new()
         .route("/", get(|| async { Html(include_str!("ui/index.html")) }))
         .route("/app.js", get(script))
+        .route("/components.js", get(components))
         .route("/style.css", get(stylesheet))
         .route("/healthz", get(s::healthz))
         .route("/metrics", get(s::metrics))

@@ -1,32 +1,6 @@
 "use strict";
-// Hostnames, notes and names come from clients and other people, so all text goes
-// in through textContent: el() has no way to set HTML. Paths are relative so the
-// page works under a proxy prefix.
-
-function el(tag, props = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (value === undefined || value === null || value === false) continue;
-    if (key === "onclick" || key === "onsubmit" || key === "onchange" || key === "oninput") node[key] = value;
-    else if (key === "class") node.className = value;
-    else if (key === "value") node.value = value;
-    else if (key === "hidden" || key === "disabled" || key === "required" || key === "selected") node[key] = true;
-    else node.setAttribute(key, value);
-  }
-  for (const child of children.flat()) {
-    if (child !== null && child !== undefined && child !== false) node.append(child);
-  }
-  return node;
-}
-
-let toastTimer;
-function toast(message) {
-  const box = document.getElementById("toast");
-  box.textContent = message;
-  box.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { box.hidden = true; }, 4000);
-}
+// State, API calls and views. Everything on screen is built from components.js.
+// Paths are relative so the page works under a proxy prefix.
 
 async function api(method, path, body) {
   const options = { method, credentials: "same-origin" };
@@ -56,88 +30,42 @@ function bytes(count) {
   return (unit === 0 ? value : value.toFixed(1)) + " " + units[unit];
 }
 
-function field(label, input, cls) {
-  return el("label", { class: cls }, label, input);
-}
-
-function run(action, done) {
-  return async (event) => {
-    event?.preventDefault?.();
-    try {
-      await action();
-      if (done) toast(done);
-      await refresh();
-    } catch (error) {
-      toast(error.message);
-    }
+// Make a change, say so, redraw. Buttons and forms show a failure in a toast.
+function changes(action, done) {
+  return async () => {
+    await action();
+    if (done) toast(done, "success");
+    await refresh();
   };
 }
 
-function ask(message, action, done) {
-  return () => { if (confirm(message)) run(action, done)(); };
+function ask(message, action, done, { danger = true, confirmLabel } = {}) {
+  return () => dialog({
+    message, danger, confirmLabel, action,
+    after: () => { toast(done, "success"); return refresh(); },
+  });
 }
 
-function table(headers, rows, empty) {
-  if (!rows.length) return el("div", { class: "empty" }, empty);
-  return el("div", { class: "scroll" }, el("table", {},
-    el("tr", {}, headers.map((h) => el("th", {}, h))),
-    rows));
+function askText({ label, value, type, placeholder, ready, ...rest }, action, done, after = refresh) {
+  return () => dialog({
+    ...rest, ready, action,
+    control: field(label, input({ type, value, placeholder, autocomplete: type === "password" ? "new-password" : "off" })),
+    after: () => { toast(done, "success"); return after(); },
+  });
 }
 
-// One-off secrets stay on screen until someone leaves the page or logs out.
-function reveal(title, secret, extra) {
-  return el("div", { class: "reveal" },
-    el("strong", {}, title),
-    el("code", { class: "mono" }, secret),
-    extra ? el("div", { class: "mono" }, extra) : null,
-    el("button", { type: "button", onclick: async (event) => {
-      const code = event.target.parentElement.querySelector("code");
-      try {
-        await navigator.clipboard.writeText(code.textContent);
-        toast("已复制");
-      } catch {
-        // The clipboard API needs HTTPS; selecting the text still lets it be copied.
-        getSelection().selectAllChildren(code);
-        toast("无法自动复制，已选中，请手动复制");
-      }
-    } }, "复制"));
-}
+const askNewPassword = (path) => askText({
+  title: "重置密码",
+  message: "新的初始密码，对方下次登录时必须修改。对方当前的登录会被退出。",
+  label: "新的初始密码",
+  type: "password",
+}, (password) => api("POST", path, { password }), "已重置");
 
-// A list with search and paging, keeping its place between refreshes.
-function pagedList(key, load, render) {
-  const state = pages[key] ??= { q: "", offset: 0 };
-  const box = el("div", {});
-  const search = el("input", { type: "search", placeholder: "搜索", value: state.q, oninput: (event) => {
-    state.q = event.target.value;
-    state.offset = 0;
-    clearTimeout(state.timer);
-    state.timer = setTimeout(draw, 250);
-  } });
-  const body = el("div", {});
-  const pager = el("div", { class: "pager muted" });
-  box.append(el("div", { class: "toolbar" }, search), body, pager);
-  async function draw() {
-    const query = new URLSearchParams({ q: state.q, limit: PAGE, offset: state.offset });
-    try {
-      const page = await load(query.toString());
-      body.replaceChildren(render(page.items));
-      pager.replaceChildren(...(page.total > PAGE ? [
-        el("button", { disabled: state.offset === 0, onclick: () => { state.offset = Math.max(0, state.offset - PAGE); draw(); } }, "上一页"),
-        el("span", {}, (state.offset + 1) + "–" + Math.min(state.offset + PAGE, page.total) + " / " + page.total),
-        el("button", { disabled: state.offset + PAGE >= page.total, onclick: () => { state.offset += PAGE; draw(); } }, "下一页"),
-      ] : []));
-    } catch (error) {
-      toast(error.message);
-    }
-  }
-  draw();
-  return box;
-}
-
-const PAGE = 50;
 const STATUS = { active: "可用", used: "已用完", expired: "已过期", revoked: "已撤销" };
+const STATUS_TONE = { active: "success", used: "muted", expired: "muted", revoked: "muted" };
 const STANDING = { super: "超管", owner: "owner", admin: "管理员" };
 const ROLE = { owner: "owner", admin: "管理员" };
+const ROLE_TONE = { owner: "success", admin: "neutral" };
 const ACTIONS = {
   login: "登录", login_failed: "登录失败", logout: "退出", change_password: "修改密码", end_session: "结束会话",
   update_settings: "修改服务设置", create_workspace: "创建工作区", update_workspace: "修改工作区", delete_workspace: "删除工作区",
@@ -152,74 +80,62 @@ let current = { scope: null, tab: null };
 let revealed = {};
 let poll = null;
 
-const root = () => document.getElementById("root");
 const wsPath = (path = "") => "w/" + current.scope + path;
 const myWorkspace = () => me.workspaces.find((w) => w.id === current.scope);
+const list = (key, load, render) => pagedList(pages[key] ??= { q: "", offset: 0 }, load, render);
+
+function show(...nodes) {
+  closeOverlays();
+  document.getElementById("root").replaceChildren(...nodes);
+}
 
 // ---- Before the console opens ----
 
 function showLogin() {
   stopPolling();
   me = null; pages = {}; revealed = {}; current = { scope: null, tab: null };
-  const user = el("input", { autocomplete: "username", required: true });
-  const pass = el("input", { type: "password", autocomplete: "current-password" });
-  root().replaceChildren(el("div", { class: "narrow" }, el("section", {},
-    el("h2", {}, "varco 管理后台"),
-    el("form", { class: "stack", id: "login-form", onsubmit: async (event) => {
-      event.preventDefault();
-      try {
-        await api("POST", "login", { username: user.value, password: pass.value });
-        await boot();
-      } catch (error) { toast(error.message); }
-    } },
+  const user = input({ autocomplete: "username", required: true });
+  const pass = input({ type: "password", autocomplete: "current-password" });
+  show(authPage("varco 管理后台", null,
+    formOf({ id: "login-form", layout: "stack" }, async () => {
+      await api("POST", "login", { username: user.value, password: pass.value });
+      await boot();
+    },
       field("用户名", user),
       field("密码", pass),
-      el("button", { class: "primary" }, "登录")),
-  )));
+      formActions(submitButton("登录")))));
 }
 
 function showChangePassword() {
   stopPolling();
-  const pass = el("input", { type: "password", id: "new-password", autocomplete: "new-password" });
-  root().replaceChildren(el("div", { class: "narrow" }, el("section", {},
-    el("h2", {}, "请先修改密码"),
-    el("p", { class: "muted" }, "这是首次登录或密码刚被重置。密码没有任何限制，由你自己决定。"),
-    el("form", { class: "stack", id: "password-form", onsubmit: async (event) => {
-      event.preventDefault();
-      try {
-        await api("POST", "me/password", { password: pass.value });
-        await boot();
-      } catch (error) { toast(error.message); }
-    } },
+  const pass = input({ type: "password", id: "new-password", autocomplete: "new-password" });
+  show(authPage("请先修改密码", "这是首次登录或密码刚被重置。密码没有任何限制，由你自己决定。",
+    formOf({ id: "password-form", layout: "stack" }, async () => {
+      await api("POST", "me/password", { password: pass.value });
+      await boot();
+    },
       field("新密码", pass),
-      el("button", { class: "primary" }, "保存")),
-    el("p", {}, el("button", { onclick: logout }, "退出")),
-  )));
+      formActions(submitButton("保存"))),
+    button("退出", { variant: "ghost", onclick: logout })));
 }
 
 async function showSetup() {
   stopPolling();
   const settings = await api("GET", "settings");
-  const addr = el("input", { id: "setup-addr", class: "mono", value: settings.public_addr ?? settings.suggested_public_addr, required: true });
-  const listen = el("input", { id: "setup-listen", class: "mono", value: settings.relay_listen ?? settings.suggested_relay_listen, required: true });
-  root().replaceChildren(el("div", { class: "narrow" }, el("section", {},
-    el("h2", {}, "初始化服务"),
-    el("p", { class: "muted" }, "客户端按对外地址连接中继。保存后中继开始监听。"),
-    el("form", { class: "stack", id: "setup-form", onsubmit: async (event) => {
-      event.preventDefault();
-      try {
-        await api("PUT", "settings", { public_addr: addr.value, relay_listen: listen.value });
-        await boot();
-      } catch (error) { toast(error.message); }
-    } },
+  const addr = input({ id: "setup-addr", mono: true, value: settings.public_addr ?? settings.suggested_public_addr, required: true });
+  const listen = input({ id: "setup-listen", mono: true, value: settings.relay_listen ?? settings.suggested_relay_listen, required: true });
+  show(authPage("初始化服务", "客户端按对外地址连接中继。保存后中继开始监听。",
+    formOf({ id: "setup-form", layout: "stack" }, async () => {
+      await api("PUT", "settings", { public_addr: addr.value, relay_listen: listen.value });
+      await boot();
+    },
       field("对外地址（写进 Code）", addr),
       field("中继监听地址", listen),
-      el("button", { class: "primary" }, "保存")),
-  )));
+      formActions(submitButton("保存")))));
 }
 
 async function logout() {
-  try { await api("POST", "logout"); } catch (error) { toast(error.message); }
+  try { await api("POST", "logout"); } catch (error) { toast(error.message, "error"); }
   showLogin();
 }
 
@@ -232,7 +148,7 @@ async function boot() {
   if (!me) return showLogin();
   if (me.must_change_password) return showChangePassword();
   if (me.setup_needed) {
-    try { return await showSetup(); } catch (error) { return toast(error.message); }
+    try { return await showSetup(); } catch (error) { return toast(error.message, "error"); }
   }
   const keep = me.workspaces.some((w) => w.id === current.scope) || current.scope === "system";
   if (!keep) current = { scope: me.workspaces[0]?.id ?? (me.is_super ? "system" : null), tab: null };
@@ -265,32 +181,45 @@ function tabsFor() {
   return WORKSPACE_TABS.filter(([key]) => key !== "admins" || standing !== "admin");
 }
 
-function drawApp() {
-  const tabs = tabsFor();
-  if (current.tab !== "me" && !tabs.some(([key]) => key === current.tab)) current.tab = tabs[0]?.[0] ?? null;
-  const options = [
-    ...(me.is_super ? [el("option", { value: "system", selected: current.scope === "system" }, "系统管理")] : []),
-    ...me.workspaces.map((w) => el("option", { value: String(w.id), selected: w.id === current.scope }, w.name + "（" + STANDING[w.standing] + "）")),
+function switchScope(scope) {
+  current = { scope, tab: null };
+  pages = {};
+  revealed = {};
+  drawApp();
+}
+
+function userMenu() {
+  const scopes = [
+    ...(me.is_super ? [{ label: "系统管理", icon: "shield", checked: current.scope === "system", onselect: () => switchScope("system") }] : []),
+    ...me.workspaces.map((w) => ({
+      label: w.name, hint: STANDING[w.standing], icon: "layers", checked: w.id === current.scope, onselect: () => switchScope(w.id),
+    })),
   ];
+  const trigger = el("button", { type: "button", id: "user-menu", class: "user-trigger" },
+    el("span", { class: "user-avatar" }, me.username.slice(0, 1).toUpperCase()),
+    el("span", { class: "user-name" }, me.username),
+    icon("chevron"));
+  return dropdownMenu(trigger, [
+    scopes.length ? { title: "切换工作区", scroll: true, items: scopes } : null,
+    { items: [
+      { label: "我的账号设置", icon: "settings", checked: current.tab === "me", onselect: () => { current.tab = "me"; drawApp(); } },
+      { label: "退出", id: "logout", icon: "logout", onselect: logout },
+    ] },
+  ]);
+}
+
+function drawApp() {
+  const items = tabsFor();
+  if (current.tab !== "me" && !items.some(([key]) => key === current.tab)) current.tab = items[0]?.[0] ?? null;
+  const scopeName = current.scope === "system" ? "系统管理" : myWorkspace()?.name;
   const content = el("main", { id: "content" });
-  root().replaceChildren(
-    el("header", {},
-      el("h1", {}, "varco"),
-      options.length ? el("select", { id: "scope", onchange: (event) => {
-        const value = event.target.value;
-        current = { scope: value === "system" ? "system" : Number(value), tab: null };
-        pages = {};
-        revealed = {};
-        drawApp();
-      } }, options) : null,
-      el("span", { class: "spacer" }),
-      el("span", { class: "muted" }, me.username),
-      el("button", { onclick: () => { current.tab = "me"; drawApp(); } }, "我的账号"),
-      el("button", { id: "logout", onclick: logout }, "退出")),
-    tabs.length ? el("nav", {}, tabs.map(([key, label]) => el("button", {
-      class: key === current.tab ? "active" : "", "data-tab": key,
-      onclick: () => { current.tab = key; drawApp(); },
-    }, label))) : null,
+  show(
+    el("header", { class: "topbar" },
+      logo(),
+      scopeName && el("span", { class: "topbar-scope", title: scopeName }, scopeName),
+      el("span", { class: "topbar-spacer" }),
+      userMenu()),
+    items.length ? tabs(items, current.tab, (key) => { current.tab = key; drawApp(); }) : null,
     content,
   );
   drawTab(content);
@@ -302,7 +231,7 @@ async function drawTab(content) {
     const view = await draw();
     content.replaceChildren(...[view].flat().filter(Boolean));
   } catch (error) {
-    toast(error.message);
+    toast(error.message, "error");
   }
 }
 
@@ -324,7 +253,7 @@ function stopPolling() {
 }
 
 function viewNothing() {
-  return el("section", {}, el("p", { class: "muted" }, "你的账号还没有加入任何工作区，请联系超管。"));
+  return card(null, {}, el("p", { class: "muted" }, "你的账号还没有加入任何工作区，请联系超管。"));
 }
 
 // ---- Workspace views ----
@@ -333,43 +262,37 @@ async function viewMembers() {
   const [overview, page, kicked] = await Promise.all([
     api("GET", wsPath()), api("GET", wsPath("/members?limit=500")), api("GET", wsPath("/kicked")),
   ]);
-  const stats = overview.stats ?? {};
+  const summary = overview.stats ?? {};
   const banIp = (m) => ask("拉黑 IP " + m.peer + "？同一出口后的所有人都会被断开，只在这个工作区生效。",
-    () => api("POST", wsPath("/bans"), { kind: "ip", value: m.peer, note: m.hostname }), "已拉黑 IP");
+    () => api("POST", wsPath("/bans"), { kind: "ip", value: m.peer, note: m.hostname }), "已拉黑 IP", { confirmLabel: "拉黑" });
   const banDevice = (m) => ask("拉黑设备 " + m.hostname + "？这台设备重开程序或换 Code 都进不来。克隆的系统可能共用同一个 ID。",
-    () => api("POST", wsPath("/bans"), { kind: "device", value: m.device, note: m.hostname }), "已拉黑设备");
+    () => api("POST", wsPath("/bans"), { kind: "device", value: m.device, note: m.hostname }), "已拉黑设备", { confirmLabel: "拉黑" });
   return [
-    el("div", { class: "chips" },
-      el("div", { class: "chip" }, el("div", { class: "muted" }, overview.workspace.name + " · " + overview.workspace.cidr),
-        el("strong", {}, (stats.online ?? 0) + " / " + (stats.capacity ?? 0)), "在线"),
-      el("div", { class: "chip" }, el("div", { class: "muted" }, "累计收发（重启后清零）"),
-        el("strong", {}, bytes(stats.rx_bytes) + " / " + bytes(stats.tx_bytes)))),
-    el("section", {},
-      el("h2", {}, "在线成员"),
-      table(["主机名", "虚拟 IP", "来源 IP", "设备", "Code", "上线时间", "收 / 发", ""],
-        page.items.map((m) => el("tr", {},
-          el("td", {}, m.hostname),
-          el("td", { class: "mono" }, m.ip),
-          el("td", { class: "mono" }, m.peer ?? "—"),
-          el("td", { class: "mono", title: m.device ?? "这台设备没有上报 ID，不能按设备拉黑" }, m.device ? short(m.device) : "未知设备"),
-          el("td", { class: "mono" }, short(m.code)),
-          el("td", {}, time(m.since)),
-          el("td", {}, bytes(m.rx_bytes) + " / " + bytes(m.tx_bytes)),
-          el("td", {},
-            el("button", { class: "danger", onclick: ask("踢出 " + m.hostname + "？", () => api("POST", wsPath("/members/kick"), { id: m.id }), "已踢出") }, "踢出"),
-            m.device ? el("button", { class: "danger", onclick: banDevice(m) }, "拉黑设备") : null,
-            m.peer ? el("button", { class: "danger", onclick: banIp(m) }, "拉黑 IP") : null),
-        )),
-        "现在没有人在线"),
-      el("p", { class: "muted" }, "踢出：断开并结束这次运行，对方重开程序后，只要 Code 还有效就能回来。要彻底拦住，请撤销 Code 并拉黑设备。")),
-    kicked.length ? el("section", {},
-      el("h2", {}, "已踢出"),
-      table(["主机名", "时间", ""], kicked.map((k) => el("tr", {},
-        el("td", {}, k.hostname),
-        el("td", {}, time(k.at)),
-        el("td", {}, el("button", { onclick: run(() => api("DELETE", wsPath("/kicked/" + encodeURIComponent(k.client))), "已解除") }, "解除")),
-      )), ""),
-      el("p", { class: "muted" }, "记录保留 7 天。解除后，那次运行如果还开着，会自动连回来。")) : null,
+    stats(
+      stat(overview.workspace.name + " · " + overview.workspace.cidr, (summary.online ?? 0) + " / " + (summary.capacity ?? 0), "在线"),
+      stat("累计收发（重启后清零）", bytes(summary.rx_bytes) + " / " + bytes(summary.tx_bytes))),
+    card("在线成员", { hint: "踢出：断开并结束这次运行，对方重开程序后，只要 Code 还有效就能回来。要彻底拦住，请撤销 Code 并拉黑设备。" },
+      dataTable(["主机名", "虚拟 IP", "来源 IP", "设备", "Code", "上线时间", "收 / 发", ""],
+        page.items.map((m) => [
+          m.hostname,
+          monoCell(m.ip),
+          monoCell(m.peer ?? "—"),
+          monoCell(m.device ? short(m.device) : "未知设备", m.device ?? "这台设备没有上报 ID，不能按设备拉黑"),
+          monoCell(short(m.code)),
+          time(m.since),
+          bytes(m.rx_bytes) + " / " + bytes(m.tx_bytes),
+          rowActions(
+            rowButton("踢出", ask("踢出 " + m.hostname + "？", () => api("POST", wsPath("/members/kick"), { id: m.id }), "已踢出", { confirmLabel: "踢出" }), { danger: true }),
+            m.device && rowButton("拉黑设备", banDevice(m), { danger: true }),
+            m.peer && rowButton("拉黑 IP", banIp(m), { danger: true })),
+        ]),
+        "现在没有人在线")),
+    kicked.length ? card("已踢出", { hint: "记录保留 7 天。解除后，那次运行如果还开着，会自动连回来。" },
+      dataTable(["主机名", "时间", ""], kicked.map((k) => [
+        k.hostname,
+        time(k.at),
+        rowActions(rowButton("解除", changes(() => api("DELETE", wsPath("/kicked/" + encodeURIComponent(k.client))), "已解除"))),
+      ]), "")) : null,
   ];
 }
 
@@ -381,26 +304,22 @@ function limitText(code) {
 }
 
 function codeRows(items) {
-  return table(["ID", "限制", "状态", "备注", "使用者", "创建时间", ""],
-    items.map((c) => el("tr", {},
-      el("td", { class: "mono", title: c.id }, short(c.id)),
-      el("td", {}, limitText(c)),
-      el("td", {}, el("span", { class: "badge " + c.status }, STATUS[c.status] ?? c.status)),
-      el("td", { class: "wrap" }, c.note || "—"),
-      el("td", { class: "wrap" }, c.used_by.length ? c.used_by.map((u) => u.hostname + "（" + u.peer + "）").join("，") : "—"),
-      el("td", {}, time(c.created_at)),
-      el("td", {},
-        el("button", { onclick: () => {
-          const note = prompt("备注", c.note);
-          if (note !== null) run(() => api("PATCH", wsPath("/codes/" + c.id), { note }), "已保存")();
-        } }, "改备注"),
-        c.expires_at ? el("button", { onclick: () => {
-          const duration = prompt("从现在起的有效时长，如 30m、24h、7d。不影响已连接的设备。", "24h");
-          if (duration !== null) run(() => api("PATCH", wsPath("/codes/" + c.id), { duration }), "已保存")();
-        } }, "改期限") : null,
-        c.status !== "revoked" ? el("button", { class: "danger", onclick: ask("撤销这个 Code？用它进来的设备会被立即断开，且不能再连接。", () => api("POST", wsPath("/codes/" + c.id + "/revoke")), "已撤销") }, "撤销") : null,
-        el("button", { class: "danger", onclick: ask("删除这条记录？如果 Code 还有效，也会一并撤销，用它进来的设备会被断开。", () => api("DELETE", wsPath("/codes/" + c.id)), "已删除") }, "删除")),
-    )),
+  return dataTable(["ID", "限制", "状态", "备注", "使用者", "创建时间", ""],
+    items.map((c) => [
+      monoCell(short(c.id), c.id),
+      limitText(c),
+      badge(STATUS[c.status] ?? c.status, STATUS_TONE[c.status]),
+      cell(c.note || "—", { wrap: true }),
+      cell(c.used_by.length ? c.used_by.map((u) => u.hostname + "（" + u.peer + "）").join("，") : "—", { wrap: true }),
+      time(c.created_at),
+      rowActions(
+        rowButton("改备注", askText({ title: "改备注", label: "备注", value: c.note }, (note) => api("PATCH", wsPath("/codes/" + c.id), { note }), "已保存")),
+        c.expires_at && rowButton("改期限", askText({
+          title: "改期限", message: "不影响已连接的设备。", label: "从现在起的有效时长，如 30m、24h、7d", value: "24h",
+        }, (duration) => api("PATCH", wsPath("/codes/" + c.id), { duration }), "已保存")),
+        c.status !== "revoked" && rowButton("撤销", ask("撤销这个 Code？用它进来的设备会被立即断开，且不能再连接。", () => api("POST", wsPath("/codes/" + c.id + "/revoke")), "已撤销", { confirmLabel: "撤销" }), { danger: true }),
+        rowButton("删除", ask("删除这条记录？如果 Code 还有效，也会一并撤销，用它进来的设备会被断开。", () => api("DELETE", wsPath("/codes/" + c.id)), "已删除", { confirmLabel: "删除" }), { danger: true })),
+    ]),
     "还没有生成过 Code");
 }
 
@@ -412,15 +331,17 @@ const CODE_KINDS = {
 };
 
 function viewCodes() {
-  const kind = el("select", { id: "code-kind", onchange: () => sync() },
-    Object.entries(CODE_KINDS).map(([key, value]) => el("option", { value: key }, value.label)));
-  const duration = el("input", { id: "code-duration", value: "24h", placeholder: "30m、24h、7d" });
-  const maxUses = el("input", { id: "code-max", type: "number", min: "1", value: "3" });
+  const kind = select({
+    id: "code-kind", onchange: () => sync(),
+    options: Object.entries(CODE_KINDS).map(([value, choice]) => ({ value, label: choice.label })),
+  });
+  const duration = input({ id: "code-duration", value: "24h", placeholder: "30m、24h、7d" });
+  const maxUses = input({ id: "code-max", type: "number", min: "1", value: "3" });
   const durationField = field("有效时长", duration);
-  const maxField = field("最多使用次数（每次运行算一次）", maxUses);
-  const note = el("input", { id: "code-note", placeholder: "发给谁、做什么用" });
-  const ssh = el("input", { id: "code-ssh", class: "mono", placeholder: "ssh-ed25519 AAAA…" });
-  const showCode = () => revealed.code ? reveal("Code 只显示这一次，请现在复制。", revealed.code.text, revealed.code.key) : "";
+  const maxField = field("最多使用次数", maxUses, { hint: "每次运行算一次" });
+  const note = input({ id: "code-note", placeholder: "发给谁、做什么用" });
+  const ssh = input({ id: "code-ssh", mono: true, placeholder: "ssh-ed25519 AAAA…" });
+  const showCode = () => revealed.code ? secretReveal("Code 只显示这一次，请现在复制。", revealed.code.text, revealed.code.key) : "";
   const slot = el("div", {}, showCode());
   function sync() {
     const choice = CODE_KINDS[kind.value];
@@ -428,138 +349,126 @@ function viewCodes() {
     maxField.hidden = choice.max !== true;
   }
   sync();
-  const form = el("form", { class: "grid", id: "code-form", onsubmit: async (event) => {
-    event.preventDefault();
+  const holder = el("div", {});
+  const drawList = () => holder.replaceChildren(list("codes", (query) => api("GET", wsPath("/codes?" + query)), codeRows));
+  drawList();
+  const form = formOf({ id: "code-form" }, async () => {
     const choice = CODE_KINDS[kind.value];
     const body = { note: note.value, ssh_pubkey: ssh.value };
     if (choice.duration) body.duration = duration.value;
     if (choice.max === true) body.max_uses = Number(maxUses.value);
     else if (choice.max) body.max_uses = choice.max;
-    try {
-      const created = await api("POST", wsPath("/codes"), body);
-      revealed.code = {
-        text: created.code,
-        key: created.key_fingerprint ? "可远程控制的公钥：" + created.key_fingerprint : null,
-      };
-      slot.replaceChildren(showCode());
-      note.value = ""; ssh.value = "";
-      list.reload();
-    } catch (error) { toast(error.message); }
-  } },
+    const created = await api("POST", wsPath("/codes"), body);
+    revealed.code = {
+      text: created.code,
+      key: created.key_fingerprint ? "可远程控制的公钥：" + created.key_fingerprint : null,
+    };
+    slot.replaceChildren(showCode());
+    note.value = ""; ssh.value = "";
+    drawList();
+  },
     field("类型", kind), durationField, maxField, field("备注", note),
-    field("SSH 公钥（可选，对方确认后持有私钥的人能远程控制对方电脑）", ssh, "wide"),
-    el("div", {}, el("button", { class: "primary" }, "生成")));
-  const list = reloadable("codes", (query) => api("GET", wsPath("/codes?" + query)), codeRows);
+    field("SSH 公钥（可选）", ssh, { wide: true, hint: "对方确认后持有私钥的人能远程控制对方电脑" }),
+    formActions(submitButton("生成")));
   return [
-    el("section", {}, el("h2", {}, "生成 Code"), form, slot),
-    el("section", {}, el("h2", {}, "已生成的 Code"), list.node),
+    card("生成 Code", {}, form, slot),
+    card("已生成的 Code", {}, holder),
   ];
 }
 
-// A paged list that a form next to it can ask to reload, without losing the form.
-function reloadable(key, load, render) {
-  const holder = el("div", {});
-  const draw = () => holder.replaceChildren(pagedList(key, load, render));
-  draw();
-  return { node: holder, reload: draw };
-}
-
 function banRows(items, remove) {
-  return table(["类型", "内容", "备注", "到期", "时间", ""],
-    items.map((b) => el("tr", {},
-      el("td", {}, b.kind === "ip" ? "IP" : "设备"),
-      el("td", { class: "mono", title: b.value }, b.kind === "ip" ? b.value : short(b.value)),
-      el("td", { class: "wrap" }, b.note || "—"),
-      el("td", {}, b.expires_at ? time(b.expires_at) : "永久"),
-      el("td", {}, time(b.created_at)),
-      el("td", {}, el("button", { onclick: ask("解除这条拉黑？", () => remove(b.id), "已解除") }, "解除")),
-    )),
+  return dataTable(["类型", "内容", "备注", "到期", "时间", ""],
+    items.map((b) => [
+      b.kind === "ip" ? "IP" : "设备",
+      monoCell(b.kind === "ip" ? b.value : short(b.value), b.value),
+      cell(b.note || "—", { wrap: true }),
+      b.expires_at ? time(b.expires_at) : "永久",
+      time(b.created_at),
+      rowActions(rowButton("解除", ask("解除这条拉黑？", () => remove(b.id), "已解除", { danger: false, confirmLabel: "解除" }))),
+    ]),
     "黑名单是空的");
 }
 
 function banForm(submit, explanation) {
-  const kind = el("select", { id: "ban-kind", onchange: () => {
-    value.placeholder = kind.value === "ip" ? "203.0.113.7 或 198.51.100.0/24" : "64 位设备 ID";
-  } }, el("option", { value: "ip" }, "IP 或网段"), el("option", { value: "device" }, "设备 ID"));
-  const value = el("input", { id: "ban-value", class: "mono", required: true, placeholder: "203.0.113.7 或 198.51.100.0/24" });
-  const note = el("input", { id: "ban-note" });
-  const duration = el("input", { id: "ban-duration", placeholder: "留空为永久，或 30m、24h、7d" });
-  return el("section", {},
-    el("h2", {}, "添加黑名单"),
-    el("form", { class: "grid", id: "ban-form", onsubmit: run(() => submit({ kind: kind.value, value: value.value, note: note.value, duration: duration.value }), "已拉黑") },
+  const value = input({ id: "ban-value", mono: true, required: true, placeholder: "203.0.113.7 或 198.51.100.0/24" });
+  const kind = select({
+    id: "ban-kind",
+    options: [{ value: "ip", label: "IP 或网段" }, { value: "device", label: "设备 ID" }],
+    onchange: (next) => { value.placeholder = next === "ip" ? "203.0.113.7 或 198.51.100.0/24" : "64 位设备 ID"; },
+  });
+  const note = input({ id: "ban-note" });
+  const duration = input({ id: "ban-duration", placeholder: "留空为永久，或 30m、24h、7d" });
+  return card("添加黑名单", { hint: explanation },
+    formOf({ id: "ban-form" }, changes(() => submit({ kind: kind.value, value: value.value, note: note.value, duration: duration.value }), "已拉黑"),
       field("类型", kind), field("内容", value), field("备注", note), field("时长", duration),
-      el("div", {}, el("button", { class: "primary" }, "拉黑"))),
-    el("p", { class: "muted" }, explanation));
+      formActions(submitButton("拉黑"))));
 }
 
 function viewBans() {
   return [
     banForm((body) => api("POST", wsPath("/bans"), body),
       "立即断开匹配的连接，只在这个工作区生效。拉黑 IP 会影响同一出口后的所有人。设备 ID 由客户端上报，克隆的系统可能共用同一个 ID。"),
-    el("section", {}, el("h2", {}, "黑名单"),
-      pagedList("bans", (query) => api("GET", wsPath("/bans?" + query)),
+    card("黑名单", {},
+      list("bans", (query) => api("GET", wsPath("/bans?" + query)),
         (items) => banRows(items, (id) => api("DELETE", wsPath("/bans/" + id))))),
   ];
 }
 
 function viewConnections() {
-  return el("section", {}, el("h2", {}, "连接历史"),
-    pagedList("connections", (query) => api("GET", wsPath("/connections?" + query)), (items) =>
-      table(["主机名", "虚拟 IP", "来源 IP", "设备", "上线", "下线", "收 / 发"],
-        items.map((c) => el("tr", {},
-          el("td", {}, c.hostname),
-          el("td", { class: "mono" }, c.ip),
-          el("td", { class: "mono" }, c.peer),
-          el("td", { class: "mono", title: c.device ?? "" }, c.device ? short(c.device) : "—"),
-          el("td", {}, time(c.started_at)),
-          el("td", {}, c.ended_at ? time(c.ended_at) : "在线"),
-          el("td", {}, c.ended_at ? bytes(c.rx_bytes) + " / " + bytes(c.tx_bytes) : "—"),
-        )),
+  return card("连接历史", {},
+    list("connections", (query) => api("GET", wsPath("/connections?" + query)), (items) =>
+      dataTable(["主机名", "虚拟 IP", "来源 IP", "设备", "上线", "下线", "收 / 发"],
+        items.map((c) => [
+          c.hostname,
+          monoCell(c.ip),
+          monoCell(c.peer),
+          monoCell(c.device ? short(c.device) : "—", c.device ?? ""),
+          time(c.started_at),
+          c.ended_at ? time(c.ended_at) : badge("在线", "success"),
+          c.ended_at ? bytes(c.rx_bytes) + " / " + bytes(c.tx_bytes) : "—",
+        ]),
         "还没有连接记录")));
 }
 
 function auditRows(items) {
-  return table(["时间", "操作者", "动作", "对象", "来源"],
-    items.map((a) => el("tr", {},
-      el("td", {}, time(a.at)),
-      el("td", {}, a.actor),
-      el("td", {}, ACTIONS[a.action] ?? a.action),
-      el("td", { class: "wrap mono" }, a.target || "—"),
-      el("td", { class: "mono", title: "代理上报的来源，仅供参考" }, a.source || "—"),
-    )),
+  return dataTable(["时间", "操作者", "动作", "对象", "来源"],
+    items.map((a) => [
+      time(a.at),
+      a.actor,
+      ACTIONS[a.action] ?? a.action,
+      cell(a.target || "—", { mono: true, wrap: true }),
+      monoCell(a.source || "—", "代理上报的来源，仅供参考"),
+    ]),
     "还没有记录");
 }
 
 function viewAudit() {
-  return el("section", {}, el("h2", {}, "审计"),
-    pagedList("audit", (query) => api("GET", wsPath("/audit?" + query)), auditRows));
+  return card("审计", {},
+    list("audit", (query) => api("GET", wsPath("/audit?" + query)), auditRows));
 }
 
 function tokensSection(items, create, remove, explanation) {
-  const name = el("input", { id: "token-name", required: true, placeholder: "用途，如 ci" });
-  const duration = el("input", { id: "token-duration", placeholder: "留空为永久，或 30m、24h、7d" });
-  const slot = el("div", {});
+  const name = input({ id: "token-name", required: true, placeholder: "用途，如 ci" });
+  const duration = input({ id: "token-duration", placeholder: "留空为永久，或 30m、24h、7d" });
   return [
-    el("section", {}, el("h2", {}, "创建 Token"),
-      el("form", { class: "grid", id: "token-form", onsubmit: async (event) => {
-        event.preventDefault();
-        try {
-          const created = await create({ name: name.value, duration: duration.value });
-          revealed.token = created.token;
-          await refresh();
-        } catch (error) { toast(error.message); }
-      } }, field("名称", name), field("有效时长", duration), el("div", {}, el("button", { class: "primary" }, "创建"))),
-      el("p", { class: "muted" }, explanation), slot,
-      revealed.token ? reveal("Token 只显示这一次，请现在复制。", revealed.token) : null),
-    el("section", {}, el("h2", {}, "Token"),
-      table(["名称", "创建时间", "到期", "最后使用", ""],
-        items.map((t) => el("tr", {},
-          el("td", {}, t.name),
-          el("td", {}, time(t.created_at)),
-          el("td", {}, t.expires_at ? time(t.expires_at) : "永久"),
-          el("td", {}, time(t.last_used)),
-          el("td", {}, el("button", { class: "danger", onclick: ask("删除这个 Token？用它的脚本会立即失效。", () => remove(t.id), "已删除") }, "删除")),
-        )),
+    card("创建 Token", { hint: explanation },
+      formOf({ id: "token-form" }, async () => {
+        const created = await create({ name: name.value, duration: duration.value });
+        revealed.token = created.token;
+        await refresh();
+      },
+        field("名称", name), field("有效时长", duration),
+        formActions(submitButton("创建"))),
+      revealed.token ? secretReveal("Token 只显示这一次，请现在复制。", revealed.token) : null),
+    card("Token", {},
+      dataTable(["名称", "创建时间", "到期", "最后使用", ""],
+        items.map((t) => [
+          t.name,
+          time(t.created_at),
+          t.expires_at ? time(t.expires_at) : "永久",
+          time(t.last_used),
+          rowActions(rowButton("删除", ask("删除这个 Token？用它的脚本会立即失效。", () => remove(t.id), "已删除", { confirmLabel: "删除" }), { danger: true })),
+        ]),
         "还没有 Token")),
   ];
 }
@@ -572,35 +481,33 @@ async function viewTokens() {
 
 async function viewAdmins() {
   const items = await api("GET", wsPath("/admins"));
-  const username = el("input", { id: "admin-name", required: true });
-  const password = el("input", { id: "admin-password", type: "password", autocomplete: "new-password" });
-  const role = el("select", { id: "admin-role" }, el("option", { value: "admin" }, "管理员"), el("option", { value: "owner" }, "owner"));
+  const username = input({ id: "admin-name", required: true });
+  const password = input({ id: "admin-password", type: "password", autocomplete: "new-password" });
+  const role = select({ id: "admin-role", options: [{ value: "admin", label: "管理员" }, { value: "owner", label: "owner" }] });
   const canAttach = myWorkspace()?.standing === "super";
-  const attach = el("input", { type: "checkbox", id: "admin-attach" });
+  const attach = checkbox("使用已有账号（不用填密码）", { id: "admin-attach" });
   return [
-    el("section", {}, el("h2", {}, "添加管理员"),
-      el("form", { class: "grid", id: "admin-form", onsubmit: run(() => {
+    card("添加管理员", { hint: "只有 owner 能增删管理员。工作区至少保留一个 owner。" },
+      formOf({ id: "admin-form" }, changes(() => {
         const body = { username: username.value, role: role.value };
-        if (!canAttach || !attach.checked) body.password = password.value;
+        if (!canAttach || !attach.input.checked) body.password = password.value;
         return api("POST", wsPath("/admins"), body);
-      }, "已添加") },
-        field("用户名", username), field("初始密码（首次登录时必须修改）", password), field("角色", role),
-        canAttach ? field("使用已有账号（不用填密码）", attach) : null,
-        el("div", {}, el("button", { class: "primary" }, "添加"))),
-      el("p", { class: "muted" }, "只有 owner 能增删管理员。工作区至少保留一个 owner。")),
-    el("section", {}, el("h2", {}, "管理员"),
-      table(["用户名", "角色", ""],
-        items.map((a) => el("tr", {},
-          el("td", {}, a.username, a.shared ? el("span", { class: "muted" }, "（也属于其他工作区）") : null),
-          el("td", {}, el("span", { class: "badge " + a.role }, ROLE[a.role])),
-          el("td", {},
-            el("button", { onclick: run(() => api("PATCH", wsPath("/admins/" + a.user_id), { role: a.role === "owner" ? "admin" : "owner" }), "已修改") }, a.role === "owner" ? "设为管理员" : "设为 owner"),
-            el("button", { onclick: () => {
-              const value = prompt("新的初始密码，对方下次登录时必须修改。对方当前的登录会被退出。");
-              if (value !== null) run(() => api("POST", wsPath("/admins/" + a.user_id + "/password"), { password: value }), "已重置")();
-            } }, "重置密码"),
-            el("button", { class: "danger", onclick: ask("移除 " + a.username + "？", () => api("DELETE", wsPath("/admins/" + a.user_id)), "已移除") }, "移除")),
-        )),
+      }, "已添加"),
+        field("用户名", username),
+        field("初始密码", password, { hint: "首次登录时必须修改" }),
+        field("角色", role),
+        canAttach ? attach : null,
+        formActions(submitButton("添加")))),
+    card("管理员", {},
+      dataTable(["用户名", "角色", ""],
+        items.map((a) => [
+          [a.username, a.shared ? el("span", { class: "muted" }, "（也属于其他工作区）") : null],
+          badge(ROLE[a.role], ROLE_TONE[a.role]),
+          rowActions(
+            rowButton(a.role === "owner" ? "设为管理员" : "设为 owner", changes(() => api("PATCH", wsPath("/admins/" + a.user_id), { role: a.role === "owner" ? "admin" : "owner" }), "已修改")),
+            rowButton("重置密码", askNewPassword(wsPath("/admins/" + a.user_id + "/password"))),
+            rowButton("移除", ask("移除 " + a.username + "？", () => api("DELETE", wsPath("/admins/" + a.user_id)), "已移除", { confirmLabel: "移除" }), { danger: true })),
+        ]),
         "还没有管理员")),
   ];
 }
@@ -608,92 +515,67 @@ async function viewAdmins() {
 // ---- System views ----
 
 async function viewWorkspaces() {
-  const list = await api("GET", "workspaces");
-  const name = el("input", { id: "ws-name", required: true });
-  const cidr = el("input", { id: "ws-cidr", class: "mono", required: true, value: list.suggested_cidr });
-  const owner = el("input", { id: "ws-owner", placeholder: "可选" });
-  const ownerPassword = el("input", { id: "ws-owner-password", type: "password", autocomplete: "new-password", placeholder: "首次登录时必须修改" });
+  const all = await api("GET", "workspaces");
+  const name = input({ id: "ws-name", required: true });
+  const cidr = input({ id: "ws-cidr", mono: true, required: true, value: all.suggested_cidr });
+  const owner = input({ id: "ws-owner", placeholder: "可选" });
+  const ownerPassword = input({ id: "ws-owner-password", type: "password", autocomplete: "new-password", placeholder: "首次登录时必须修改" });
   return [
-    el("section", {}, el("h2", {}, "创建工作区"),
-      el("form", { class: "grid", id: "workspace-form", onsubmit: async (event) => {
-        event.preventDefault();
+    card("创建工作区", { hint: "每个工作区一张组网，相互隔离，网段可以重叠。owner 留空时可以稍后添加；填已有账号且不填密码，会把这个账号加进来。" },
+      formOf({ id: "workspace-form" }, async () => {
         const body = { name: name.value, cidr: cidr.value };
         if (owner.value.trim()) {
           body.owner_username = owner.value;
           if (ownerPassword.value) body.owner_password = ownerPassword.value;
         }
-        try {
-          await api("POST", "workspaces", body);
-          toast("已创建");
-          await boot();
-        } catch (error) { toast(error.message); }
-      } },
+        await api("POST", "workspaces", body);
+        toast("已创建", "success");
+        await boot();
+      },
         field("名称", name), field("网段（/20 到 /30）", cidr), field("owner 用户名", owner), field("owner 初始密码", ownerPassword),
-        el("div", {}, el("button", { class: "primary" }, "创建"))),
-      el("p", { class: "muted" }, "每个工作区一张组网，相互隔离，网段可以重叠。owner 留空时可以稍后添加；填已有账号且不填密码，会把这个账号加进来。")),
-    el("section", {}, el("h2", {}, "工作区"),
-      table(["名称", "网段", "在线", "累计收 / 发", "创建时间", ""],
-        list.items.map((w) => el("tr", {},
-          el("td", {}, w.name),
-          el("td", { class: "mono" }, w.cidr),
-          el("td", {}, (w.stats?.online ?? 0) + " / " + (w.stats?.capacity ?? 0)),
-          el("td", {}, bytes(w.stats?.rx_bytes) + " / " + bytes(w.stats?.tx_bytes)),
-          el("td", {}, time(w.created_at)),
-          el("td", {},
-            el("button", { onclick: () => {
-              const value = prompt("新名称", w.name);
-              if (value !== null) updateWorkspace(w.id, { name: value }, "已改名");
-            } }, "改名"),
-            el("button", { onclick: () => {
-              const value = prompt("新网段。所有成员会断开，重连后拿到新地址。", w.cidr);
-              if (value !== null) updateWorkspace(w.id, { cidr: value }, "已修改网段");
-            } }, "改网段"),
-            el("button", { class: "danger", onclick: () => {
-              if (prompt("删除工作区会断开所有成员，并删除它的 Code、记录和只属于它的账号，不能恢复。\n输入工作区名称确认：") === w.name) {
-                deleteWorkspace(w.id);
-              }
-            } }, "删除")),
-        )),
+        formActions(submitButton("创建")))),
+    card("工作区", {},
+      dataTable(["名称", "网段", "在线", "累计收 / 发", "创建时间", ""],
+        all.items.map((w) => [
+          w.name,
+          monoCell(w.cidr),
+          (w.stats?.online ?? 0) + " / " + (w.stats?.capacity ?? 0),
+          bytes(w.stats?.rx_bytes) + " / " + bytes(w.stats?.tx_bytes),
+          time(w.created_at),
+          rowActions(
+            rowButton("改名", askText({ title: "改名", label: "新名称", value: w.name },
+              (value) => api("PATCH", "workspaces/" + w.id, { name: value }), "已改名", boot)),
+            rowButton("改网段", askText({ title: "改网段", message: "所有成员会断开，重连后拿到新地址。", label: "新网段", value: w.cidr },
+              (value) => api("PATCH", "workspaces/" + w.id, { cidr: value }), "已修改网段", boot)),
+            rowButton("删除", askText({
+              title: "删除工作区",
+              message: "删除工作区会断开所有成员，并删除它的 Code、记录和只属于它的账号，不能恢复。",
+              label: "输入工作区名称确认",
+              placeholder: w.name,
+              danger: true,
+              confirmLabel: "删除",
+              ready: (value) => value === w.name,
+            }, () => api("DELETE", "workspaces/" + w.id, {}), "已删除", boot), { danger: true })),
+        ]),
         "还没有工作区，先创建一个")),
   ];
-}
-
-async function updateWorkspace(id, body, done) {
-  try {
-    await api("PATCH", "workspaces/" + id, body);
-    toast(done);
-    await boot();
-  } catch (error) { toast(error.message); }
-}
-
-async function deleteWorkspace(id) {
-  try {
-    await api("DELETE", "workspaces/" + id, {});
-    toast("已删除");
-    await boot();
-  } catch (error) { toast(error.message); }
 }
 
 async function viewUsers() {
   const [users, workspaces] = await Promise.all([api("GET", "users"), api("GET", "workspaces")]);
   const nameOf = (id) => workspaces.items.find((w) => w.id === id)?.name ?? "?";
-  return el("section", {}, el("h2", {}, "账号"),
-    el("p", { class: "muted" }, "普通账号在工作区的“管理员”页添加。"),
-    table(["用户名", "身份", "工作区", "待改密码", "创建时间", ""],
-      users.map((u) => el("tr", {},
-        el("td", {}, u.username),
-        el("td", {}, u.is_super ? "超管" : "管理员"),
-        el("td", { class: "wrap" }, u.workspaces.map(([id, role]) => nameOf(id) + "（" + ROLE[role] + "）").join("，") || "—"),
-        el("td", {}, u.must_change_password ? "是" : "否"),
-        el("td", {}, time(u.created_at)),
-        el("td", {}, u.is_super ? null : [
-          el("button", { onclick: () => {
-            const value = prompt("新的初始密码，对方下次登录时必须修改。对方当前的登录会被退出。");
-            if (value !== null) run(() => api("POST", "users/" + u.id + "/password", { password: value }), "已重置")();
-          } }, "重置密码"),
-          el("button", { class: "danger", onclick: ask("删除账号 " + u.username + "？", () => api("DELETE", "users/" + u.id), "已删除") }, "删除"),
-        ]),
-      )),
+  return card("账号", { hint: "普通账号在工作区的“管理员”页添加。" },
+    dataTable(["用户名", "身份", "工作区", "待改密码", "创建时间", ""],
+      users.map((u) => [
+        u.username,
+        u.is_super ? "超管" : "管理员",
+        cell(u.workspaces.map(([id, role]) => nameOf(id) + "（" + ROLE[role] + "）").join("，") || "—", { wrap: true }),
+        u.must_change_password ? "是" : "否",
+        time(u.created_at),
+        u.is_super ? "" : rowActions(
+          rowButton("重置密码", askNewPassword("users/" + u.id + "/password")),
+          rowButton("删除", ask("删除账号 " + u.username + "？", () => api("DELETE", "users/" + u.id), "已删除", { confirmLabel: "删除" }), { danger: true })),
+      ]),
       "没有账号"));
 }
 
@@ -701,15 +583,15 @@ function viewGlobalBans() {
   return [
     banForm((body) => api("POST", "bans", body),
       "对所有工作区生效。拉黑的 IP 在 TLS 之前就被丢弃。"),
-    el("section", {}, el("h2", {}, "全局黑名单"),
-      pagedList("sbans", (query) => api("GET", "bans?" + query),
+    card("全局黑名单", {},
+      list("sbans", (query) => api("GET", "bans?" + query),
         (items) => banRows(items, (id) => api("DELETE", "bans/" + id)))),
   ];
 }
 
 function viewGlobalAudit() {
-  return el("section", {}, el("h2", {}, "全局审计"),
-    pagedList("saudit", (query) => api("GET", "audit?" + query), auditRows));
+  return card("全局审计", {},
+    list("saudit", (query) => api("GET", "audit?" + query), auditRows));
 }
 
 async function viewGlobalTokens() {
@@ -720,35 +602,38 @@ async function viewGlobalTokens() {
 
 async function viewSettings() {
   const settings = await api("GET", "settings");
-  const addr = el("input", { id: "set-addr", class: "mono", value: settings.public_addr ?? settings.suggested_public_addr });
-  const listen = el("input", { id: "set-listen", class: "mono", value: settings.relay_listen ?? settings.suggested_relay_listen });
-  const days = el("input", { id: "set-days", type: "number", min: "1", value: String(settings.history_days) });
-  return el("section", {}, el("h2", {}, "服务设置"),
-    el("p", { class: settings.relay_listening_on ? "muted" : "" }, settings.relay_listening_on ? "中继正在监听 " + settings.relay_listening_on : "中继没有在监听，请检查监听地址"),
-    el("form", { class: "stack", id: "settings-form", onsubmit: run(() => api("PUT", "settings", {
+  const addr = input({ id: "set-addr", mono: true, value: settings.public_addr ?? settings.suggested_public_addr });
+  const listen = input({ id: "set-listen", mono: true, value: settings.relay_listen ?? settings.suggested_relay_listen });
+  const days = input({ id: "set-days", type: "number", min: "1", value: String(settings.history_days) });
+  return card("服务设置", {},
+    settings.relay_listening_on
+      ? notice("中继正在监听 " + settings.relay_listening_on, "ok")
+      : notice("中继没有在监听，请检查监听地址", "warn"),
+    formOf({ id: "settings-form", layout: "stack" }, changes(() => api("PUT", "settings", {
       public_addr: addr.value, relay_listen: listen.value, history_days: Number(days.value),
-    }), "已保存") },
-      field("对外地址（写进新 Code，已发出的 Code 仍指向旧地址）", addr),
-      field("中继监听地址（修改时已连接的成员不受影响）", listen),
+    }), "已保存"),
+      field("对外地址", addr, { hint: "写进新 Code，已发出的 Code 仍指向旧地址" }),
+      field("中继监听地址", listen, { hint: "修改时已连接的成员不受影响" }),
       field("连接历史和审计保留天数", days),
-      el("div", {}, el("button", { class: "primary" }, "保存"))));
+      formActions(submitButton("保存"))));
 }
 
 async function viewMe() {
   const sessions = await api("GET", "me/sessions");
-  const password = el("input", { id: "my-password", type: "password", autocomplete: "new-password" });
+  const password = input({ id: "my-password", type: "password", autocomplete: "new-password" });
   return [
-    el("section", {}, el("h2", {}, "修改密码"),
-      el("form", { class: "stack", id: "my-password-form", onsubmit: run(() => api("POST", "me/password", { password: password.value }), "已修改，其他登录已退出") },
-        field("新密码", password), el("div", {}, el("button", { class: "primary" }, "保存")))),
-    el("section", {}, el("h2", {}, "登录中的会话"),
-      table(["设备", "登录时间", "最近活动", ""],
-        sessions.map((s) => el("tr", {},
-          el("td", { class: "wrap" }, s.user_agent || "—"),
-          el("td", {}, time(s.created_at)),
-          el("td", {}, time(s.last_seen)),
-          el("td", {}, el("button", { class: "danger", onclick: run(() => api("DELETE", "me/sessions/" + s.id), "已结束") }, "结束")),
-        )),
+    card("修改密码", {},
+      formOf({ id: "my-password-form", layout: "stack" }, changes(() => api("POST", "me/password", { password: password.value }), "已修改，其他登录已退出"),
+        field("新密码", password),
+        formActions(submitButton("保存")))),
+    card("登录中的会话", {},
+      dataTable(["设备", "登录时间", "最近活动", ""],
+        sessions.map((s) => [
+          cell(s.user_agent || "—", { wrap: true }),
+          time(s.created_at),
+          time(s.last_seen),
+          rowActions(rowButton("结束", changes(() => api("DELETE", "me/sessions/" + s.id), "已结束"), { danger: true })),
+        ]),
         "")),
   ];
 }

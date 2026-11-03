@@ -149,6 +149,7 @@ enum Needs {
 const ROUTES: &[(&str, &str, Needs)] = &[
     ("GET", "/", Needs::Nothing),
     ("GET", "/app.js", Needs::Nothing),
+    ("GET", "/components.js", Needs::Nothing),
     ("GET", "/style.css", Needs::Nothing),
     ("GET", "/healthz", Needs::Nothing),
     ("GET", "/metrics", Needs::Super),
@@ -742,7 +743,7 @@ async fn cookie_flags_follow_the_proxy() {
 #[tokio::test]
 async fn pages_have_protective_headers_and_no_inline_allowance() {
     let h = harness("page");
-    for path in ["/", "/app.js", "/style.css"] {
+    for path in ["/", "/app.js", "/components.js", "/style.css"] {
         let (status, headers, _) = h.send(Method::GET, path, &Credential_::None, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[X_FRAME_OPTIONS], "DENY");
