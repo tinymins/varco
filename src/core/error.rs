@@ -8,6 +8,9 @@ pub enum FailReason {
     ServerUnreachable(String),
     PinMismatch,
     CredentialRejected,
+    CodeUsed,
+    CodeExpired,
+    Removed,
     NetworkFull,
     VersionMismatch,
     NoPrivilege,
@@ -22,6 +25,9 @@ impl FailReason {
             self,
             Self::BadCredential
                 | Self::CredentialRejected
+                | Self::CodeUsed
+                | Self::CodeExpired
+                | Self::Removed
                 | Self::VersionMismatch
                 | Self::NoPrivilege
                 | Self::DeviceFailed(_)
@@ -41,6 +47,9 @@ impl fmt::Display for FailReason {
                 "服务器证书与 Code 不符，当前网络可能在拦截加密连接，已中止，Code 未发送"
             ),
             Self::CredentialRejected => write!(f, "Code 无效或已被撤销"),
+            Self::CodeUsed => write!(f, "这个 Code 已被使用，如果不是你用的，请告诉管理员"),
+            Self::CodeExpired => write!(f, "这个 Code 已过期，请向管理员要新的"),
+            Self::Removed => write!(f, "已被管理员移出"),
             Self::NetworkFull => write!(f, "组网地址已用完，请联系管理员"),
             Self::VersionMismatch => write!(f, "程序版本与服务器不兼容，请更新"),
             Self::NoPrivilege => write!(f, "没有管理员权限，无法创建虚拟网卡"),

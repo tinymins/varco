@@ -39,6 +39,10 @@ done
 docker exec -i varco-srv bash -c 'mkdir -p /etc/varco && cat > /etc/varco/config.toml' <<CFG
 listen = "0.0.0.0:$PORT"
 public_addr = "varco-srv:$PORT"
+[admin]
+listen = "127.0.0.1:8444"
+username = "e2e-admin"
+password = "e2e-console-password"
 [[network]]
 name = "a"
 cidr = "10.77.1.0/24"
@@ -354,6 +358,75 @@ ex a1 "$BIN code add-ssh-key --code $CODE_A --ssh-pubkey /tmp/id >/tmp/priv.log 
 refuse "and is not printed" ex a1 "grep -q 'PRIVATE\|^b3Blbn' /tmp/priv.log"
 ex a1 "VARCO_CREDENTIAL=varco1.AAAA $BIN >/tmp/old.log 2>&1"
 check  "the old Code format is refused" ex a1 "grep -q '格式不正确' /tmp/old.log"
+
+echo "== admin console"
+api() {
+  local method=$1 path=$2 body=${3:-'{}'}
+  if [ "$method" = GET ]; then
+    docker exec varco-srv curl -s -b /tmp/console.cookies "http://127.0.0.1:8444/api/$path"
+  else
+    docker exec varco-srv curl -s -b /tmp/console.cookies -c /tmp/console.cookies -X "$method" \
+      -H 'Content-Type: application/json' -d "$body" -w '%{http_code}' "http://127.0.0.1:8444/api/$path"
+  fi
+}
+field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+member_field() { api GET members | sed 's/},{/}\n{/g' | grep "\"hostname\":\"$1\"" | field "$2"; }
+stop_a3() { ex a3 "pkill -x varco; true"; for _ in $(seq 30); do [ -z "$(mesh_ip a3)" ] && return 0; sleep 0.5; done; return 1; }
+a3_exits_with() { for _ in $(seq 60); do
+    ex a3 "pgrep -x varco" >/dev/null || { ex a3 "tail -3 /tmp/client.log" | grep -q "$1"; return; }
+    sleep 0.5; done; return 1; }
+join_a3() { join a3 "$1"; IP_A3=$(wait_ip a3); [ -n "$IP_A3" ] && wait_ping a1 "$IP_A3" 20; }
+
+[ "$(api POST login '{"username":"e2e-admin","password":"wrong"}' | tail -c 3)" = 401 ] && ok "a wrong password is refused" || bad "a wrong password was accepted"
+check  "the API needs a session" bash -c "[ \"\$(docker exec varco-srv curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8444/api/members)\" = 401 ]"
+[ "$(api POST login '{"username":"e2e-admin","password":"e2e-console-password"}')" = 204 ] && ok "the configured account logs in" || bad "login failed"
+check  "the page is served" ex srv "curl -s http://127.0.0.1:8444/ | grep -q 'varco 管理后台'"
+
+stop_a3
+# The image has no machine id of its own; this stands in for a real machine's.
+ex a3 "echo 0123456789abcdef0123456789abcdef > /etc/machine-id"
+ONCE=$(api POST codes '{"network":"a","kind":"once","note":"e2e"}' | field code)
+join_a3 "$ONCE" && ok "a once Code joins with no server restart" || bad "the once Code did not join"
+sleep 1
+expect_msg "a second device is refused the once Code" "$ONCE" "已被使用"
+stop_server; sleep 2; start_server; sleep 1
+check  "its device comes back after a server restart" wait_ping a1 "$IP_A3" 40
+expect_msg "and it is still refused to others" "$ONCE" "已被使用"
+[ "$(api POST login '{"username":"e2e-admin","password":"e2e-console-password"}')" = 204 ] || bad "login after restart failed"
+
+api POST members/kick "{\"id\":\"$(member_field a3 id)\"}" >/dev/null
+a3_exits_with "已被管理员移出" && ok "a kicked client stops instead of reconnecting" || bad "the kicked client did not stop"
+expect_msg "a kick does not refund the once Code" "$ONCE" "已被使用"
+
+TIMED_REPLY=$(api POST codes '{"network":"a","kind":"timed","duration":"1h"}')
+TIMED=$(echo "$TIMED_REPLY" | field code); TIMED_ID=$(echo "$TIMED_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+stop_a3
+join_a3 "$TIMED" && ok "a timed Code joins" || bad "the timed Code did not join"
+DEVICE=$(member_field a3 device)
+[ -n "$DEVICE" ] && ok "the device id is reported from the machine id" || bad "no device id reported"
+BAN_REPLY=$(api POST bans "{\"kind\":\"device\",\"value\":\"$DEVICE\"}")
+BAN_ID=$(echo "$BAN_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+a3_exits_with "已被管理员移出" && ok "banning the device removes it" || bad "the banned device stayed"
+join a3 "$CODE_A"
+a3_exits_with "已被管理员移出" && ok "the banned device stays out with another Code" || bad "the banned device got back in"
+api DELETE "bans/$BAN_ID" >/dev/null
+join_a3 "$TIMED" && ok "lifting the ban lets it back" || bad "still out after the ban was lifted"
+
+A3_ETH=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' varco-a3)
+BAN_REPLY=$(api POST bans "{\"kind\":\"ip\",\"value\":\"$A3_ETH\"}")
+BAN_ID=$(echo "$BAN_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+refuse "banning its address cuts it off" bash -c "sleep 2; docker exec varco-a1 ping -c1 -W2 $IP_A3"
+check  "and the client keeps trying without being told why" ex a3 "pgrep -x varco"
+api DELETE "bans/$BAN_ID" >/dev/null
+check  "lifting the address ban restores it" wait_ping a1 "$IP_A3" 40
+
+api POST "codes/$TIMED_ID/revoke" >/dev/null
+a3_exits_with "无效或已被撤销" && ok "revoking a Code removes who came with it" || bad "the revoked Code's client stayed"
+
+check  "the state file is private" bash -c "[ \"\$(docker exec varco-srv stat -c %a /etc/varco/varco-state.json)\" = 600 ]"
+refuse "no Code in the state file"    ex srv "grep -qF '$ONCE' /etc/varco/varco-state.json"
+refuse "no Code in the server log"    ex srv "grep -qF '$ONCE' /tmp/server.log"
+refuse "no password in the server log" ex srv "grep -qF 'e2e-console-password' /tmp/server.log"
 
 echo "== secrets stay out of logs"
 SECRET_VALUE=$(secret "$OUT_A")

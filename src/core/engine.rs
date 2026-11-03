@@ -130,6 +130,7 @@ pub async fn run<F: DeviceFactory>(
     mut stop: watch::Receiver<bool>,
 ) {
     let client_id = new_client_id();
+    let device_id = super::device::device_id();
     let mut device: Option<Arc<F::Device>> = None;
     let mut current: Option<NetInfo> = None;
     let mut attempt: u32 = 0;
@@ -138,7 +139,7 @@ pub async fn run<F: DeviceFactory>(
     loop {
         let prev_ip = current.as_ref().map(|net| net.ip);
         let connected = tokio::select! {
-            result = connect(&credential, &client_id, &hostname, prev_ip) => result,
+            result = connect(&credential, &client_id, device_id.as_deref(), &hostname, prev_ip) => result,
             _ = stop.changed() => break,
         };
 
@@ -226,6 +227,7 @@ type ClientTls = tokio_rustls::client::TlsStream<TcpStream>;
 async fn connect(
     credential: &Credential,
     client_id: &str,
+    device_id: Option<&str>,
     hostname: &str,
     prev_ip: Option<Ipv4Addr>,
 ) -> Result<(ClientTls, Welcome), FailReason> {
@@ -262,6 +264,7 @@ async fn connect(
         client_id: client_id.to_owned(),
         hostname: hostname.to_owned(),
         prev_ip,
+        device_id: device_id.map(str::to_owned),
     };
     let protocol = |e: io::Error| FailReason::Protocol(e.to_string());
     write_frame(&mut stream, &Frame::Hello(hello))
@@ -279,6 +282,9 @@ async fn connect(
             Ok((stream, welcome))
         }
         Frame::Reject(RejectReason::InvalidCredential) => Err(FailReason::CredentialRejected),
+        Frame::Reject(RejectReason::CodeUsed) => Err(FailReason::CodeUsed),
+        Frame::Reject(RejectReason::CodeExpired) => Err(FailReason::CodeExpired),
+        Frame::Reject(RejectReason::Removed) => Err(FailReason::Removed),
         Frame::Reject(RejectReason::NetworkFull) => Err(FailReason::NetworkFull),
         Frame::Reject(RejectReason::UnsupportedVersion) => Err(FailReason::VersionMismatch),
         _ => Err(FailReason::Protocol("服务器响应不符合协议".to_owned())),

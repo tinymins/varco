@@ -1,5 +1,6 @@
 //! Client connection logic, shared by the GUI and CLI front ends.
 pub mod backend;
+pub mod device;
 pub mod engine;
 pub mod error;
 #[cfg(unix)]

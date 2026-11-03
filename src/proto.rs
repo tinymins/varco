@@ -28,6 +28,9 @@ pub struct Hello {
     pub client_id: String,
     pub hostname: String,
     pub prev_ip: Option<Ipv4Addr>,
+    /// Absent from older clients, and ignored by older servers.
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 impl fmt::Debug for Hello {
@@ -53,6 +56,10 @@ pub enum RejectReason {
     InvalidCredential,
     NetworkFull,
     UnsupportedVersion,
+    CodeUsed,
+    CodeExpired,
+    /// Kicked or banned from the admin console.
+    Removed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +181,7 @@ mod tests {
                 client_id: "c".into(),
                 hostname: "h".into(),
                 prev_ip: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                device_id: Some("d".into()),
             }),
             Frame::Welcome(Welcome {
                 network: "n".into(),
@@ -182,6 +190,9 @@ mod tests {
                 mtu: MTU,
             }),
             Frame::Reject(RejectReason::NetworkFull),
+            Frame::Reject(RejectReason::CodeUsed),
+            Frame::Reject(RejectReason::CodeExpired),
+            Frame::Reject(RejectReason::Removed),
             Frame::Packet(Bytes::from_static(&[1, 2, 3])),
             Frame::Packet(Bytes::new()),
             Frame::Ping(42),
@@ -215,6 +226,13 @@ mod tests {
     }
 
     #[test]
+    fn hello_from_an_older_client_still_parses() {
+        let old = r#"{"version":1,"secret":"s","client_id":"c","hostname":"h","prev_ip":null}"#;
+        let hello: Hello = serde_json::from_str(old).unwrap();
+        assert_eq!(hello.device_id, None);
+    }
+
+    #[test]
     fn hello_debug_omits_the_secret() {
         let hello = Hello {
             version: 1,
@@ -222,6 +240,7 @@ mod tests {
             client_id: "idvalue".into(),
             hostname: "h".into(),
             prev_ip: None,
+            device_id: None,
         };
         let shown = format!("{hello:?}");
         assert!(!shown.contains("topsecret") && !shown.contains("idvalue"));

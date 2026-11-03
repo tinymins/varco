@@ -1,12 +1,13 @@
-//! Membership, address allocation and the forwarding rule. Holds no I/O, so the
-//! security-relevant logic can be tested directly.
+//! Membership, address allocation and the forwarding rule. Holds no socket I/O, so
+//! the security-relevant logic can be tested directly.
 use super::config::NetworkConfig;
+use super::state::{client_key, Ban, BanTarget, ChangeError, Store};
 use crate::credential::{secret_eq, Secret};
 use crate::proto::{ipv4_endpoints, Member, RejectReason};
 use bytes::Bytes;
 use ipnet::Ipv4Net;
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Notify};
@@ -26,6 +27,44 @@ struct Lease {
     hostname: String,
     live: Option<Live>,
     offline_since: Instant,
+    details: Details,
+}
+
+/// What the console shows about a connection.
+#[derive(Debug, Clone, Default)]
+pub struct Details {
+    pub peer: Option<IpAddr>,
+    pub device: Option<String>,
+    pub code: Option<String>,
+    pub since: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemberView {
+    /// A [`client_key`], which is safe to show and is what a kick is addressed to.
+    pub id: String,
+    pub network: String,
+    pub hostname: String,
+    pub ip: Ipv4Addr,
+    pub peer: Option<IpAddr>,
+    pub device: Option<String>,
+    pub code: Option<String>,
+    pub since: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NetworkView {
+    pub name: String,
+    pub cidr: String,
+    pub online: usize,
+    pub capacity: usize,
+}
+
+/// A secret from the config file: the console can list it but not change it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CredentialView {
+    pub network: String,
+    pub fingerprint: String,
 }
 
 #[derive(Default)]
@@ -45,6 +84,7 @@ struct Network {
 pub struct Hub {
     secrets: Vec<(Secret, usize)>,
     networks: Vec<Network>,
+    store: Option<Arc<Store>>,
 }
 
 pub struct Session {
@@ -96,7 +136,25 @@ impl Hub {
                 members: watch::Sender::new(Arc::new(Vec::new())),
             });
         }
-        Self { secrets, networks }
+        Self {
+            secrets,
+            networks,
+            store: None,
+        }
+    }
+
+    /// Without a store only secrets from the config file are accepted.
+    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn store(&self) -> Option<&Arc<Store>> {
+        self.store.as_ref()
+    }
+
+    pub fn network_index(&self, name: &str) -> Option<usize> {
+        self.networks.iter().position(|net| net.name == name)
     }
 
     /// Compares against every secret, so timing does not reveal which matched.
@@ -154,6 +212,7 @@ impl Hub {
                         hostname: hostname.clone(),
                         live: Some(live),
                         offline_since: now,
+                        details: Details::default(),
                     },
                 );
             }
@@ -228,6 +287,115 @@ impl Hub {
 
     pub fn network(&self, session: &Session) -> usize {
         session.network
+    }
+
+    pub fn describe(&self, session: &Session, details: Details) {
+        let net = &self.networks[session.network];
+        let mut state = net.state.lock().expect("hub lock poisoned");
+        if let Some(lease) = state.leases.get_mut(&session.client_id) {
+            lease.details = details;
+        }
+    }
+
+    pub fn members(&self) -> Vec<MemberView> {
+        let mut members = Vec::new();
+        for net in &self.networks {
+            let state = net.state.lock().expect("hub lock poisoned");
+            for (client_id, lease) in &state.leases {
+                if lease.live.is_some() {
+                    members.push(member_view(net, client_id, lease));
+                }
+            }
+        }
+        members.sort_by(|a, b| (&a.network, a.ip).cmp(&(&b.network, b.ip)));
+        members
+    }
+
+    pub fn network_views(&self) -> Vec<NetworkView> {
+        self.networks
+            .iter()
+            .map(|net| {
+                let state = net.state.lock().expect("hub lock poisoned");
+                NetworkView {
+                    name: net.name.clone(),
+                    cidr: net.cidr.to_string(),
+                    online: state.leases.values().filter(|l| l.live.is_some()).count(),
+                    capacity: net.cidr.hosts().count(),
+                }
+            })
+            .collect()
+    }
+
+    pub fn credential_views(&self) -> Vec<CredentialView> {
+        self.secrets
+            .iter()
+            .map(|(secret, network)| CredentialView {
+                network: self.networks[*network].name.clone(),
+                // A hash of a 32-byte random secret reveals nothing about it.
+                fingerprint: client_key(&crate::credential::encode_secret(secret))[..16].to_owned(),
+            })
+            .collect()
+    }
+
+    /// Only ends connections. The client reconnects at once, so whatever should
+    /// keep it out has to be recorded before calling this.
+    fn disconnect_where(&self, matches: impl Fn(&MemberView) -> bool) -> usize {
+        let mut count = 0;
+        for net in &self.networks {
+            let state = net.state.lock().expect("hub lock poisoned");
+            for (client_id, lease) in &state.leases {
+                if let Some(live) = &lease.live {
+                    if matches(&member_view(net, client_id, lease)) {
+                        live.kick.notify_one();
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Ends this run of the client. Whether it can come back after being started
+    /// again depends on its Code.
+    pub fn kick_member(&self, id: &str, now: u64) -> Result<(), ChangeError> {
+        if !self.members().iter().any(|member| member.id == id) {
+            return Err(ChangeError::NotFound);
+        }
+        self.require_store()?.kick(id, now)?;
+        self.disconnect_where(|member| member.id == id);
+        Ok(())
+    }
+
+    pub fn revoke_code(&self, id: &str, now: u64) -> Result<(), ChangeError> {
+        self.require_store()?.revoke_code(id, now)?;
+        self.disconnect_where(|member| member.code.as_deref() == Some(id));
+        Ok(())
+    }
+
+    pub fn add_ban(&self, target: BanTarget, note: &str, now: u64) -> Result<Ban, ChangeError> {
+        let ban = self.require_store()?.add_ban(target, note, now)?;
+        self.disconnect_where(|member| {
+            member.peer.is_some_and(|peer| ban.target.covers_ip(peer))
+                || ban.target.covers_device(member.device.as_deref())
+        });
+        Ok(ban)
+    }
+
+    fn require_store(&self) -> Result<&Arc<Store>, ChangeError> {
+        self.store.as_ref().ok_or(ChangeError::NotFound)
+    }
+}
+
+fn member_view(net: &Network, client_id: &str, lease: &Lease) -> MemberView {
+    MemberView {
+        id: client_key(client_id),
+        network: net.name.clone(),
+        hostname: lease.hostname.clone(),
+        ip: lease.ip,
+        peer: lease.details.peer,
+        device: lease.details.device.clone(),
+        code: lease.details.code.clone(),
+        since: lease.details.since,
     }
 }
 

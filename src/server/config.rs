@@ -14,8 +14,17 @@ pub const MAX_PREFIX: u8 = 30;
 struct RawConfig {
     listen: String,
     public_addr: String,
+    admin: Option<RawAdmin>,
     #[serde(default, rename = "network")]
     networks: Vec<RawNetwork>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAdmin {
+    listen: String,
+    username: String,
+    password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,7 +40,25 @@ struct RawNetwork {
 pub struct Config {
     pub listen: String,
     pub public_addr: String,
+    /// The console only runs when this is set.
+    pub admin: Option<AdminConfig>,
     pub networks: Vec<NetworkConfig>,
+}
+
+#[derive(Clone)]
+pub struct AdminConfig {
+    pub listen: String,
+    pub username: String,
+    pub password: String,
+}
+
+// Hand-written so that a stray `{:?}` can never put the password in a log.
+impl std::fmt::Debug for AdminConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminConfig")
+            .field("listen", &self.listen)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -106,6 +133,11 @@ impl Config {
         Ok(Self {
             listen: raw.listen,
             public_addr: raw.public_addr,
+            admin: raw.admin.map(|admin| AdminConfig {
+                listen: admin.listen,
+                username: admin.username,
+                password: admin.password,
+            }),
             networks,
         })
     }
@@ -152,6 +184,39 @@ mod tests {
     #[test]
     fn the_committed_example_config_stays_valid() {
         Config::parse(include_str!("../../config.example.toml")).unwrap();
+    }
+
+    #[test]
+    fn admin_section_is_optional_and_takes_any_password() {
+        assert!(Config::parse(&with_network("")).unwrap().admin.is_none());
+        let text = with_network(
+            "[admin]\nlisten = \"127.0.0.1:1\"\nusername = \"me\"\npassword = \"x\"\n",
+        );
+        let admin = Config::parse(&text).unwrap().admin.unwrap();
+        assert_eq!(
+            (admin.username.as_str(), admin.password.as_str()),
+            ("me", "x")
+        );
+    }
+
+    #[test]
+    fn admin_section_must_be_complete_and_spelled_right() {
+        for body in [
+            "[admin]\nlisten = \"127.0.0.1:1\"\nusername = \"me\"\n",
+            "[admin]\nlisten = \"127.0.0.1:1\"\nusername = \"me\"\npassword = \"x\"\nextra = 1\n",
+        ] {
+            assert!(Config::parse(&with_network(body)).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn debug_output_omits_the_admin_password() {
+        let admin = AdminConfig {
+            listen: "l".into(),
+            username: "u".into(),
+            password: "topsecret".into(),
+        };
+        assert!(!format!("{admin:?}").contains("topsecret"));
     }
 
     #[test]
