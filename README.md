@@ -135,7 +135,7 @@ macOS 的 `varco.app` 请把配置放在 `varco.app/Contents/MacOS/varco.toml`�
 
 ## 服务端
 
-这一节对应预发布版 [`v1.0.0-beta.2`](https://github.com/tinymins/varco/releases/tag/v1.0.0-beta.2)，官网下载的仍是稳定版 v0.3.0，它的说明见 [v0.3.0 的 README](https://github.com/tinymins/varco/blob/v0.3.0/README.md)。
+这一节对应预发布版 [`v1.0.0-beta.3`](https://github.com/tinymins/varco/releases/tag/v1.0.0-beta.3)，官网下载的仍是稳定版 v0.3.0，它的说明见 [v0.3.0 的 README](https://github.com/tinymins/varco/blob/v0.3.0/README.md)。
 
 **1.0 与旧版不兼容**：不再有配置文件，也不迁移旧数据。升级后重新初始化，并重新发 Code。测试版之间的数据格式也可能变化。
 
