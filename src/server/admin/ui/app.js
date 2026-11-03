@@ -300,7 +300,7 @@ async function drawTab(content) {
   const draw = VIEWS[current.tab] ?? viewNothing;
   try {
     const view = await draw();
-    content.replaceChildren(...[view].flat());
+    content.replaceChildren(...[view].flat().filter(Boolean));
   } catch (error) {
     toast(error.message);
   }

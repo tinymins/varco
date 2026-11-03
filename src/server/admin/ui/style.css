@@ -16,6 +16,7 @@ header { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; pad
 header h1 { font-size: 16px; margin: 0; }
 header .spacer { flex: 1; }
 nav { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header, nav { padding-inline: max(16px, calc((100% - 1180px) / 2 + 16px)); }
 nav button { background: none; color: var(--muted); border: 0; white-space: nowrap; }
 nav button.active { color: var(--text); background: var(--bg); font-weight: 600; }
 main { max-width: 1180px; margin: 0 auto; padding: 16px; }
