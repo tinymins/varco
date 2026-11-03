@@ -312,6 +312,68 @@ async function showCodeCopies(id) {
     copies.keyed.map((key) => secretRow({ label: "联合 Code：" + key.name, hint: key.fingerprint, secret: key.code })));
 }
 
+const CODE_KINDS = {
+  once: { label: "一次性", max: 1 },
+  timed: { label: "限时（到期前不限次数）", duration: true },
+  both: { label: "限时限次", max: true, duration: true },
+  permanent: { label: "永久（适合无人值守的机器）" },
+};
+
+function kindOf(code) {
+  if (code.expires_at) return code.max_uses ? "both" : "timed";
+  return code.max_uses ? "once" : "permanent";
+}
+
+// Creating and changing a Code are one dialog. A Code's type and use limit are fixed
+// once it exists, so they stay visible but locked; without `code` it is a new one.
+function codeDialog(code) {
+  const kind = select({
+    id: "code-kind",
+    disabled: !!code,
+    value: code ? kindOf(code) : undefined,
+    onchange: () => sync(),
+    options: Object.entries(CODE_KINDS).map(([value, choice]) => ({ value, label: choice.label })),
+  });
+  const duration = input({ id: "code-duration", value: code ? "" : "24h", placeholder: code ? "留空不变，或 30m、24h、7d" : "30m、24h、7d" });
+  const maxUses = input({ id: "code-max", type: "number", min: "1", value: String(code?.max_uses ?? 3), disabled: !!code });
+  const note = input({ id: "code-note", value: code?.note ?? "", placeholder: "发给谁、做什么用" });
+  const durationField = field("有效时长", duration, code && { hint: "当前至 " + time(code.expires_at) + "，填写后从现在起算，不影响已连接的设备" });
+  const maxField = field("最多使用次数", maxUses, { hint: "每次运行算一次" });
+  function sync() {
+    const choice = CODE_KINDS[kind.value];
+    durationField.hidden = !choice.duration || code?.status === "revoked";
+    maxField.hidden = choice.max !== true;
+  }
+  sync();
+  let created = null;
+  dialog({
+    title: code ? "修改 Code" : "生成 Code",
+    confirmLabel: code ? "保存" : "生成",
+    control: el("div", { class: "dialog-fields" },
+      field("类型", kind, code && { hint: "类型和次数在生成后不能修改" }),
+      durationField, maxField, field("备注", note)),
+    action: async () => {
+      const choice = CODE_KINDS[kind.value];
+      if (code) {
+        const body = { note: note.value };
+        if (!durationField.hidden && duration.value.trim()) body.duration = duration.value;
+        await api("PATCH", wsPath("/codes/" + code.id), body);
+        return;
+      }
+      const body = { note: note.value };
+      if (choice.duration) body.duration = duration.value;
+      if (choice.max === true) body.max_uses = Number(maxUses.value);
+      else if (choice.max) body.max_uses = choice.max;
+      created = await api("POST", wsPath("/codes"), body);
+    },
+    after: async () => {
+      if (code) toast("已保存", "success");
+      await refresh();
+      if (created) await showCodeCopies(created.id).catch((error) => toast(error.message, "error"));
+    },
+  });
+}
+
 function codeRows(items) {
   return dataTable(["ID", "限制", "状态", "备注", "使用者", "创建时间", "操作"],
     items.map((c) => [
@@ -323,59 +385,16 @@ function codeRows(items) {
       time(c.created_at),
       rowActions(
         c.status !== "revoked" && rowButton("复制", () => showCodeCopies(c.id)),
-        rowButton("改备注", askText({ title: "改备注", label: "备注", value: c.note }, (note) => api("PATCH", wsPath("/codes/" + c.id), { note }), "已保存")),
-        c.expires_at && rowButton("改期限", askText({
-          title: "改期限", message: "不影响已连接的设备。", label: "从现在起的有效时长，如 30m、24h、7d", value: "24h",
-        }, (duration) => api("PATCH", wsPath("/codes/" + c.id), { duration }), "已保存")),
+        rowButton("修改", () => codeDialog(c)),
         c.status !== "revoked" && rowButton("撤销", ask("撤销这个 Code？用它进来的设备会被立即断开，且不能再连接。", () => api("POST", wsPath("/codes/" + c.id + "/revoke")), "已撤销", { confirmLabel: "撤销" }), { danger: true }),
         rowButton("删除", ask("删除这条记录？如果 Code 还有效，也会一并撤销，用它进来的设备会被断开。", () => api("DELETE", wsPath("/codes/" + c.id)), "已删除", { confirmLabel: "删除" }), { danger: true })),
     ]),
     "还没有生成过 Code");
 }
 
-const CODE_KINDS = {
-  once: { label: "一次性", max: 1 },
-  timed: { label: "限时（到期前不限次数）", duration: true },
-  both: { label: "限时限次", max: true, duration: true },
-  permanent: { label: "永久（适合无人值守的机器）" },
-};
-
 function viewCodes() {
-  const kind = select({
-    id: "code-kind", onchange: () => sync(),
-    options: Object.entries(CODE_KINDS).map(([value, choice]) => ({ value, label: choice.label })),
-  });
-  const duration = input({ id: "code-duration", value: "24h", placeholder: "30m、24h、7d" });
-  const maxUses = input({ id: "code-max", type: "number", min: "1", value: "3" });
-  const durationField = field("有效时长", duration);
-  const maxField = field("最多使用次数", maxUses, { hint: "每次运行算一次" });
-  const note = input({ id: "code-note", placeholder: "发给谁、做什么用" });
-  function sync() {
-    const choice = CODE_KINDS[kind.value];
-    durationField.hidden = !choice.duration;
-    maxField.hidden = choice.max !== true;
-  }
-  sync();
-  const holder = el("div", {});
-  const drawList = () => holder.replaceChildren(list("codes", (query) => api("GET", wsPath("/codes?" + query)), codeRows));
-  drawList();
-  const form = formOf({ id: "code-form" }, async () => {
-    const choice = CODE_KINDS[kind.value];
-    const body = { note: note.value };
-    if (choice.duration) body.duration = duration.value;
-    if (choice.max === true) body.max_uses = Number(maxUses.value);
-    else if (choice.max) body.max_uses = choice.max;
-    const created = await api("POST", wsPath("/codes"), body);
-    note.value = "";
-    drawList();
-    await showCodeCopies(created.id);
-  },
-    field("类型", kind), durationField, maxField, field("备注", note),
-    formActions(submitButton("生成")));
-  return [
-    card("生成 Code", {}, form),
-    card("已生成的 Code", {}, holder),
-  ];
+  return card("Code", { action: button("生成 Code", { id: "code-new", size: "sm", variant: "primary", onclick: () => codeDialog() }) },
+    list("codes", (query) => api("GET", wsPath("/codes?" + query)), codeRows));
 }
 
 function banRows(items, remove) {

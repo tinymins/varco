@@ -109,6 +109,7 @@ p { margin: 0; }
 .select[aria-expanded="true"] .icon { transform: rotate(180deg); }
 
 .field { display: grid; gap: 4px; align-content: start; min-width: 0; }
+.input:disabled, .select:disabled { opacity: .6; cursor: not-allowed; }
 .field-label { color: var(--muted); font-size: 13px; }
 .field-hint { color: var(--muted); font-size: 12px; }
 .check { display: flex; align-items: center; gap: 8px; min-height: var(--control); cursor: pointer; }
@@ -162,6 +163,7 @@ p { margin: 0; }
 .dialog-wide { width: min(640px, calc(100vw - 32px)); }
 .dialog::backdrop { background: rgb(20 19 15 / 45%); }
 .dialog-form { display: grid; gap: 12px; padding: 20px; }
+.dialog-fields { display: grid; gap: 12px; }
 .dialog-title { margin: 0; font-size: 16px; font-weight: 600; }
 .dialog-message { white-space: pre-line; }
 .dialog-error { color: var(--danger); font-size: 13px; }

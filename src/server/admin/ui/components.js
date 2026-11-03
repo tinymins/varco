@@ -170,7 +170,8 @@ function closeFloating() {
 function floating(anchor, content, { align = "start", matchWidth = false, onclose } = {}) {
   closeFloating();
   const layer = el("div", { class: "floating" }, content);
-  document.body.append(layer);
+  // A modal dialog sits above everything under body, so a menu it opens must live in it.
+  (activeDialog?.node ?? document.body).append(layer);
 
   const gap = 4, margin = 8;
   const rect = anchor.getBoundingClientRect();
@@ -193,6 +194,8 @@ function floating(anchor, content, { align = "start", matchWidth = false, onclos
   };
   const onKey = (event) => {
     if (event.key === "Escape") {
+      // Closes the menu only, not a dialog it is in.
+      event.preventDefault();
       close();
       anchor.focus();
     }
@@ -216,11 +219,11 @@ function floating(anchor, content, { align = "start", matchWidth = false, onclos
 
 // The chosen value is the button's own .value, so forms read it like an input's.
 // options: [{ value, label }]; onchange gets the new value.
-function select({ id, options, value, onchange }) {
+function select({ id, options, value, onchange, disabled }) {
   const listId = "select-" + ++uid;
   const text = el("span", { class: "select-value" });
   const node = el("button", {
-    type: "button", id, class: "select", role: "combobox",
+    type: "button", id, disabled, class: "select", role: "combobox",
     "aria-haspopup": "listbox", "aria-expanded": "false", "aria-controls": listId,
   }, text, icon("chevron"));
   let close = null, rows = [], active = 0, swallowSpace = false;
@@ -379,6 +382,7 @@ function dialog({ title, message, control, confirmLabel = "确定", danger, read
   let busy = false;
 
   function close() {
+    closeFloating();
     node.close();
     node.remove();
     activeDialog = null;
@@ -428,10 +432,11 @@ function dialog({ title, message, control, confirmLabel = "确定", danger, read
   }
   document.body.append(node);
   node.showModal();
-  activeDialog = { close };
-  if (box) {
-    box.focus();
-    box.select();
+  activeDialog = { close, node };
+  const first = control && [...control.querySelectorAll("input")].find((one) => !one.disabled && one.offsetParent);
+  if (first) {
+    first.focus();
+    first.select();
   }
 }
 
@@ -439,6 +444,7 @@ function dialog({ title, message, control, confirmLabel = "确定", danger, read
 function sheet({ title }, ...body) {
   closeOverlays();
   function close() {
+    closeFloating();
     node.close();
     node.remove();
     activeDialog = null;
@@ -456,7 +462,7 @@ function sheet({ title }, ...body) {
     el("div", { class: "dialog-actions" }, button("关闭", { onclick: close }))));
   document.body.append(node);
   node.showModal();
-  activeDialog = { close };
+  activeDialog = { close, node };
 }
 
 function closeOverlays() {
@@ -466,9 +472,9 @@ function closeOverlays() {
 
 // ---- Layout ----
 
-function card(title, { hint } = {}, ...body) {
+function card(title, { hint, action } = {}, ...body) {
   return el("section", { class: "card" },
-    title && el("div", { class: "card-head" }, el("h2", { class: "card-title" }, title)),
+    title && el("div", { class: "card-head" }, el("h2", { class: "card-title" }, title), action),
     el("div", { class: "card-body" }, ...body),
     hint && el("p", { class: "card-hint" }, hint));
 }
