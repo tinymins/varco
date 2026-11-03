@@ -304,16 +304,63 @@ fn start_ssh(
     }
 }
 
+/// Windows can discard what a window showed, for example around a locked session,
+/// and asks for it back with `WM_PAINT`. Slint's software renderer then presents only
+/// what it knows has changed, usually nothing, and the rest stays empty.
+#[cfg(windows)]
+mod os_repaint {
+    use super::App;
+    use slint::winit_030::winit::{
+        event_loop::EventLoop, platform::windows::EventLoopBuilderExtWindows,
+    };
+    use slint::winit_030::EventLoopBuilder;
+    use slint::BackendSelector;
+    use std::{cell::RefCell, ptr, rc::Rc};
+    use windows_sys::Win32::Graphics::Gdi::GetUpdateRect;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MSG, WM_PAINT};
+
+    /// The returned slot receives the window once it exists.
+    pub fn install(selector: BackendSelector) -> (BackendSelector, Rc<RefCell<slint::Weak<App>>>) {
+        let target: Rc<RefCell<slint::Weak<App>>> = Rc::default();
+        let hook_target = target.clone();
+        let mut event_loop: EventLoopBuilder = EventLoop::with_user_event();
+        event_loop.with_msg_hook(move |message| {
+            // SAFETY: winit passes a valid MSG, alive for the duration of this call.
+            let message = unsafe { &*message.cast::<MSG>() };
+            // Slint's own redraw requests carry no update region, so this cannot feed itself.
+            let lost_pixels = message.message == WM_PAINT
+                && unsafe { GetUpdateRect(message.hwnd, ptr::null_mut(), 0) } != 0;
+            if lost_pixels {
+                if let Some(app) = hook_target.borrow().upgrade() {
+                    app.set_repaint_phase(!app.get_repaint_phase());
+                }
+            }
+            false
+        });
+        // An opaque window shows an unpainted area as black, never the desktop behind it.
+        let selector = selector
+            .with_winit_event_loop_builder(event_loop)
+            .with_winit_window_attributes_hook(|attributes| attributes.with_transparent(false));
+        (selector, target)
+    }
+}
+
 /// `Err` means no window could be created, and the caller falls back to the CLI.
 pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError> {
     // The software renderer is used everywhere: it needs no GPU, so remote
     // desktops and bare virtual machines behave the same as anything else.
-    slint::BackendSelector::new()
+    let selector = slint::BackendSelector::new()
         .backend_name("winit".into())
-        .renderer_name("software".into())
-        .select()?;
+        .renderer_name("software".into());
+    #[cfg(windows)]
+    let (selector, repaint_target) = os_repaint::install(selector);
+    selector.select()?;
 
     let app = App::new()?;
+    #[cfg(windows)]
+    {
+        *repaint_target.borrow_mut() = app.as_weak();
+    }
     let session: Rc<RefCell<Option<Session>>> = Rc::default();
     let ssh_service: Rc<RefCell<Option<SshService>>> = Rc::default();
     let settings = Rc::new(Launch {
@@ -522,5 +569,60 @@ mod tests {
         assert_eq!(format_bytes(1023), "1023 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(8 * 1024 * 1024), "8.0 MB");
+    }
+
+    /// Renders the real window the way the winit backend does on Windows: into a
+    /// buffer it reuses, presenting only the region the renderer returns.
+    #[test]
+    fn flipping_the_repaint_phase_redraws_the_whole_window() {
+        use slint::platform::software_renderer::{
+            MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
+        };
+        use slint::platform::{Platform, WindowAdapter};
+        use slint::PhysicalSize;
+
+        struct TestPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for TestPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+
+        const WIDTH: usize = 400;
+        const HEIGHT: usize = 560;
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(window.clone()))).unwrap();
+        let app = App::new().unwrap();
+        window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
+        app.show().unwrap();
+
+        let mut pixels = vec![PremultipliedRgbaColor::default(); WIDTH * HEIGHT];
+        let mut painted = |window: &MinimalSoftwareWindow| {
+            let mut area = 0;
+            window.draw_if_needed(|renderer| {
+                let region = renderer.render(&mut pixels, WIDTH);
+                area = region
+                    .iter()
+                    .map(|(_, size)| size.width as usize * size.height as usize)
+                    .sum();
+            });
+            area
+        };
+
+        assert_eq!(painted(&window), WIDTH * HEIGHT, "the first frame");
+        // What the OS gets when it asks for a repaint without this fix.
+        window.request_redraw();
+        assert_eq!(
+            painted(&window),
+            0,
+            "nothing changed, so nothing is presented"
+        );
+
+        app.set_repaint_phase(true);
+        assert_eq!(
+            painted(&window),
+            WIDTH * HEIGHT,
+            "the whole window comes back"
+        );
     }
 }

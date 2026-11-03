@@ -23,6 +23,13 @@ export component App inherits Window {
     default-font-size: 14px;
     background: #fafafa;
 
+    // Flipping this repaints the whole window. Slint otherwise redraws only what it
+    // knows has changed, which is nothing when the OS is the one that lost the pixels.
+    in-out property <bool> repaint-phase;
+    Rectangle {
+        background: root.repaint-phase ? #fafafb : #fafafa;
+    }
+
     // Which screen: false is the code entry, true is the joined network.
     in property <bool> joined;
     in property <bool> busy;
