@@ -245,7 +245,7 @@ fn deadlines_can_move_without_affecting_users() {
 
 #[test]
 fn deleting_beats_having_used_the_code() {
-    let store = store("delete");
+    let store = store("delete-used");
     let ws = workspace(&store, "a");
     let (record, secret) = store.create_code(ws, until(100), "", NOW).unwrap();
     let first = admit(&store, &secret, "c1");
