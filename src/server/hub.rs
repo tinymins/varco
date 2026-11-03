@@ -1,14 +1,13 @@
 //! Membership, address allocation and the forwarding rule. Holds no socket I/O, so
 //! the security-relevant logic can be tested directly.
-use super::config::NetworkConfig;
-use super::state::{client_key, Ban, BanTarget, ChangeError, Store};
-use crate::credential::{secret_eq, Secret};
+use super::store::{client_key, Ban, BanTarget, ChangeError, Store, Workspace, WorkspaceId};
 use crate::proto::{ipv4_endpoints, Member, RejectReason};
 use bytes::Bytes;
 use ipnet::Ipv4Net;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Notify};
 
@@ -16,10 +15,34 @@ pub const LEASE_HOLD: Duration = Duration::from_secs(3600);
 pub const SESSION_QUEUE: usize = 256;
 const MAX_HOSTNAME: usize = 64;
 
+/// Bytes through one connection, or one network. "rx" is what the server received
+/// from a member, "tx" is what it sent them.
+#[derive(Debug, Default)]
+pub struct Traffic {
+    rx: AtomicU64,
+    tx: AtomicU64,
+}
+
+impl Traffic {
+    pub fn rx(&self) -> u64 {
+        self.rx.load(Ordering::Relaxed)
+    }
+    pub fn tx(&self) -> u64 {
+        self.tx.load(Ordering::Relaxed)
+    }
+    pub fn add_rx(&self, bytes: usize) {
+        self.rx.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    pub fn add_tx(&self, bytes: usize) {
+        self.tx.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+}
+
 struct Live {
     session_id: u64,
     tx: mpsc::Sender<Bytes>,
     kick: Arc<Notify>,
+    traffic: Arc<Traffic>,
 }
 
 struct Lease {
@@ -43,28 +66,24 @@ pub struct Details {
 pub struct MemberView {
     /// A [`client_key`], which is safe to show and is what a kick is addressed to.
     pub id: String,
-    pub network: String,
+    pub workspace_id: WorkspaceId,
     pub hostname: String,
     pub ip: Ipv4Addr,
     pub peer: Option<IpAddr>,
     pub device: Option<String>,
     pub code: Option<String>,
     pub since: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct NetworkView {
-    pub name: String,
-    pub cidr: String,
+pub struct NetworkStats {
+    pub workspace_id: WorkspaceId,
     pub online: usize,
     pub capacity: usize,
-}
-
-/// A secret from the config file: the console can list it but not change it.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CredentialView {
-    pub network: String,
-    pub fingerprint: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Default)]
@@ -74,21 +93,22 @@ struct State {
     next_session: u64,
 }
 
-struct Network {
-    name: String,
+pub struct Network {
+    id: WorkspaceId,
+    name: RwLock<String>,
     cidr: Ipv4Net,
     state: Mutex<State>,
     members: watch::Sender<Arc<Vec<Member>>>,
+    traffic: Traffic,
 }
 
 pub struct Hub {
-    secrets: Vec<(Secret, usize)>,
-    networks: Vec<Network>,
+    networks: RwLock<HashMap<WorkspaceId, Arc<Network>>>,
     store: Option<Arc<Store>>,
 }
 
 pub struct Session {
-    network: usize,
+    pub network: Arc<Network>,
     client_id: String,
     pub session_id: u64,
     pub network_name: String,
@@ -98,6 +118,7 @@ pub struct Session {
     pub rx: mpsc::Receiver<Bytes>,
     pub kick: Arc<Notify>,
     pub members: watch::Receiver<Arc<Vec<Member>>>,
+    pub traffic: Arc<Traffic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,27 +144,114 @@ fn sanitize_hostname(raw: &str) -> String {
     }
 }
 
-impl Hub {
-    pub fn new(configs: Vec<NetworkConfig>) -> Self {
-        let mut secrets = Vec::new();
-        let mut networks = Vec::with_capacity(configs.len());
-        for (index, config) in configs.into_iter().enumerate() {
-            secrets.extend(config.secrets.iter().map(|s| (*s, index)));
-            networks.push(Network {
-                name: config.name,
-                cidr: config.cidr,
-                state: Mutex::default(),
-                members: watch::Sender::new(Arc::new(Vec::new())),
-            });
-        }
+impl Network {
+    fn new(id: WorkspaceId, name: &str, cidr: Ipv4Net) -> Self {
         Self {
-            secrets,
-            networks,
-            store: None,
+            id,
+            name: RwLock::new(name.to_owned()),
+            cidr,
+            state: Mutex::default(),
+            members: watch::Sender::new(Arc::new(Vec::new())),
+            traffic: Traffic::default(),
         }
     }
 
-    /// Without a store only secrets from the config file are accepted.
+    pub fn id(&self) -> WorkspaceId {
+        self.id
+    }
+
+    pub fn traffic(&self) -> &Traffic {
+        &self.traffic
+    }
+
+    fn name(&self) -> String {
+        self.name.read().expect("name lock poisoned").clone()
+    }
+
+    /// The whole isolation guarantee: a packet can only ever be delivered to
+    /// another online member of the sender's own network.
+    pub fn forward(&self, sender_ip: Ipv4Addr, packet: Bytes) -> Forward {
+        let Some((src, dst)) = ipv4_endpoints(&packet) else {
+            return Forward::NotIpv4;
+        };
+        if src != sender_ip {
+            return Forward::SpoofedSource;
+        }
+        if dst == sender_ip {
+            return Forward::NoRoute;
+        }
+        let state = self.state.lock().expect("hub lock poisoned");
+        let target = state
+            .by_ip
+            .get(&dst)
+            .and_then(|id| state.leases.get(id))
+            .and_then(|lease| lease.live.as_ref());
+        match target {
+            None => Forward::NoRoute,
+            // Never wait: dropping is what inner TCP treats as a congestion signal,
+            // and a stuck receiver must not hold up the sender or the lock.
+            Some(live) => match live.tx.try_send(packet) {
+                Ok(()) => Forward::Sent,
+                Err(_) => Forward::QueueFull,
+            },
+        }
+    }
+
+    fn views(&self) -> Vec<MemberView> {
+        let state = self.state.lock().expect("hub lock poisoned");
+        state
+            .leases
+            .iter()
+            .filter(|(_, lease)| lease.live.is_some())
+            .map(|(client_id, lease)| self.member_view(client_id, lease))
+            .collect()
+    }
+
+    fn member_view(&self, client_id: &str, lease: &Lease) -> MemberView {
+        let traffic = lease.live.as_ref().map(|live| &live.traffic);
+        MemberView {
+            id: client_key(client_id),
+            workspace_id: self.id,
+            hostname: lease.hostname.clone(),
+            ip: lease.ip,
+            peer: lease.details.peer,
+            device: lease.details.device.clone(),
+            code: lease.details.code.clone(),
+            since: lease.details.since,
+            rx_bytes: traffic.map_or(0, |t| t.rx()),
+            tx_bytes: traffic.map_or(0, |t| t.tx()),
+        }
+    }
+
+    /// Only ends connections. A client reconnects at once, so whatever should keep
+    /// it out has to be recorded before calling this.
+    fn disconnect_where(&self, matches: &dyn Fn(&MemberView) -> bool) -> usize {
+        let state = self.state.lock().expect("hub lock poisoned");
+        let mut count = 0;
+        for (client_id, lease) in &state.leases {
+            if let Some(live) = &lease.live {
+                if matches(&self.member_view(client_id, lease)) {
+                    live.kick.notify_one();
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+}
+
+impl Hub {
+    pub fn new(workspaces: &[Workspace]) -> Self {
+        let hub = Self {
+            networks: RwLock::default(),
+            store: None,
+        };
+        for workspace in workspaces {
+            hub.add_network(workspace);
+        }
+        hub
+    }
+
     pub fn with_store(mut self, store: Arc<Store>) -> Self {
         self.store = Some(store);
         self
@@ -153,33 +261,85 @@ impl Hub {
         self.store.as_ref()
     }
 
-    pub fn network_index(&self, name: &str) -> Option<usize> {
-        self.networks.iter().position(|net| net.name == name)
+    /// Replaces nothing that is running: a workspace's range is checked on creation.
+    pub fn add_network(&self, workspace: &Workspace) {
+        let Some(cidr) = workspace.net() else {
+            tracing::error!(workspace = workspace.id, cidr = %workspace.cidr, "stored range is invalid, network not started");
+            return;
+        };
+        let network = Arc::new(Network::new(workspace.id, &workspace.name, cidr));
+        self.networks
+            .write()
+            .expect("networks lock poisoned")
+            .insert(workspace.id, network);
     }
 
-    /// Compares against every secret, so timing does not reveal which matched.
-    pub fn authenticate(&self, secret: &Secret) -> Option<usize> {
-        let mut found = None;
-        for (candidate, network) in &self.secrets {
-            if secret_eq(candidate, secret) {
-                found = Some(*network);
-            }
+    /// Its members are disconnected. By then their Codes are gone, so they stop
+    /// instead of reconnecting.
+    pub fn remove_network(&self, id: WorkspaceId) {
+        let removed = self
+            .networks
+            .write()
+            .expect("networks lock poisoned")
+            .remove(&id);
+        if let Some(network) = removed {
+            network.disconnect_where(&|_| true);
         }
-        found
+    }
+
+    /// New range, new network: members are disconnected, reconnect, and get an
+    /// address in it. The client recreates its NIC when its address changes.
+    pub fn replace_network(&self, workspace: &Workspace) {
+        let old = self
+            .networks
+            .read()
+            .expect("networks lock poisoned")
+            .get(&workspace.id)
+            .cloned();
+        self.add_network(workspace);
+        if let Some(old) = old {
+            old.disconnect_where(&|_| true);
+        }
+    }
+
+    pub fn rename_network(&self, id: WorkspaceId, name: &str) {
+        if let Some(network) = self.network(id) {
+            *network.name.write().expect("name lock poisoned") = name.to_owned();
+        }
+    }
+
+    pub fn network(&self, id: WorkspaceId) -> Option<Arc<Network>> {
+        self.networks
+            .read()
+            .expect("networks lock poisoned")
+            .get(&id)
+            .cloned()
+    }
+
+    fn all_networks(&self) -> Vec<Arc<Network>> {
+        self.networks
+            .read()
+            .expect("networks lock poisoned")
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn join(
         &self,
-        network: usize,
+        network: WorkspaceId,
         client_id: &str,
         hostname: &str,
         prev_ip: Option<Ipv4Addr>,
         now: Instant,
     ) -> Result<Session, RejectReason> {
-        let net = &self.networks[network];
+        let net = self
+            .network(network)
+            .ok_or(RejectReason::InvalidCredential)?;
         let hostname = sanitize_hostname(hostname);
         let (tx, rx) = mpsc::channel(SESSION_QUEUE);
         let kick = Arc::new(Notify::new());
+        let traffic = Arc::new(Traffic::default());
         let mut guard = net.state.lock().expect("hub lock poisoned");
         let state = &mut *guard;
         expire(state, now);
@@ -194,6 +354,7 @@ impl Hub {
             session_id,
             tx,
             kick: kick.clone(),
+            traffic: traffic.clone(),
         };
         match state.leases.get_mut(client_id) {
             Some(lease) => {
@@ -217,58 +378,27 @@ impl Hub {
                 );
             }
         }
-        publish_members(net, state);
+        publish_members(&net, state);
         drop(guard);
         Ok(Session {
-            network,
+            network_name: net.name(),
+            prefix: net.cidr.prefix_len(),
+            members: net.members.subscribe(),
+            network: net,
             client_id: client_id.to_owned(),
             session_id,
-            network_name: net.name.clone(),
             ip,
-            prefix: net.cidr.prefix_len(),
             hostname,
             rx,
             kick,
-            members: net.members.subscribe(),
+            traffic,
         })
-    }
-
-    /// The whole isolation guarantee: a packet can only ever be delivered to
-    /// another online member of the sender's own network.
-    pub fn forward(&self, network: usize, sender_ip: Ipv4Addr, packet: Bytes) -> Forward {
-        let Some((src, dst)) = ipv4_endpoints(&packet) else {
-            return Forward::NotIpv4;
-        };
-        if src != sender_ip {
-            return Forward::SpoofedSource;
-        }
-        if dst == sender_ip {
-            return Forward::NoRoute;
-        }
-        let state = self.networks[network]
-            .state
-            .lock()
-            .expect("hub lock poisoned");
-        let target = state
-            .by_ip
-            .get(&dst)
-            .and_then(|id| state.leases.get(id))
-            .and_then(|lease| lease.live.as_ref());
-        match target {
-            None => Forward::NoRoute,
-            // Never wait: dropping is what inner TCP treats as a congestion signal,
-            // and a stuck receiver must not hold up the sender or the lock.
-            Some(live) => match live.tx.try_send(packet) {
-                Ok(()) => Forward::Sent,
-                Err(_) => Forward::QueueFull,
-            },
-        }
     }
 
     /// Ignored if the session was already replaced, so an old connection dying
     /// late cannot take a fresh one offline.
     pub fn leave(&self, session: &Session, now: Instant) {
-        let net = &self.networks[session.network];
+        let net = &session.network;
         let mut guard = net.state.lock().expect("hub lock poisoned");
         let state = &mut *guard;
         let Some(lease) = state.leases.get_mut(&session.client_id) else {
@@ -285,117 +415,106 @@ impl Hub {
         }
     }
 
-    pub fn network(&self, session: &Session) -> usize {
-        session.network
-    }
-
     pub fn describe(&self, session: &Session, details: Details) {
-        let net = &self.networks[session.network];
-        let mut state = net.state.lock().expect("hub lock poisoned");
+        let mut state = session.network.state.lock().expect("hub lock poisoned");
         if let Some(lease) = state.leases.get_mut(&session.client_id) {
             lease.details = details;
         }
     }
 
-    pub fn members(&self) -> Vec<MemberView> {
-        let mut members = Vec::new();
-        for net in &self.networks {
-            let state = net.state.lock().expect("hub lock poisoned");
-            for (client_id, lease) in &state.leases {
-                if lease.live.is_some() {
-                    members.push(member_view(net, client_id, lease));
-                }
-            }
-        }
-        members.sort_by(|a, b| (&a.network, a.ip).cmp(&(&b.network, b.ip)));
+    pub fn members(&self, workspace: WorkspaceId) -> Vec<MemberView> {
+        let mut members = self.network(workspace).map_or_else(Vec::new, |n| n.views());
+        members.sort_by_key(|member| member.ip);
         members
     }
 
-    pub fn network_views(&self) -> Vec<NetworkView> {
-        self.networks
+    pub fn stats(&self) -> Vec<NetworkStats> {
+        self.all_networks()
             .iter()
             .map(|net| {
                 let state = net.state.lock().expect("hub lock poisoned");
-                NetworkView {
-                    name: net.name.clone(),
-                    cidr: net.cidr.to_string(),
+                NetworkStats {
+                    workspace_id: net.id,
                     online: state.leases.values().filter(|l| l.live.is_some()).count(),
                     capacity: net.cidr.hosts().count(),
+                    rx_bytes: net.traffic.rx(),
+                    tx_bytes: net.traffic.tx(),
                 }
             })
             .collect()
-    }
-
-    pub fn credential_views(&self) -> Vec<CredentialView> {
-        self.secrets
-            .iter()
-            .map(|(secret, network)| CredentialView {
-                network: self.networks[*network].name.clone(),
-                // A hash of a 32-byte random secret reveals nothing about it.
-                fingerprint: client_key(&crate::credential::encode_secret(secret))[..16].to_owned(),
-            })
-            .collect()
-    }
-
-    /// Only ends connections. The client reconnects at once, so whatever should
-    /// keep it out has to be recorded before calling this.
-    fn disconnect_where(&self, matches: impl Fn(&MemberView) -> bool) -> usize {
-        let mut count = 0;
-        for net in &self.networks {
-            let state = net.state.lock().expect("hub lock poisoned");
-            for (client_id, lease) in &state.leases {
-                if let Some(live) = &lease.live {
-                    if matches(&member_view(net, client_id, lease)) {
-                        live.kick.notify_one();
-                        count += 1;
-                    }
-                }
-            }
-        }
-        count
-    }
-
-    /// Ends this run of the client. Whether it can come back after being started
-    /// again depends on its Code.
-    pub fn kick_member(&self, id: &str, now: u64) -> Result<(), ChangeError> {
-        if !self.members().iter().any(|member| member.id == id) {
-            return Err(ChangeError::NotFound);
-        }
-        self.require_store()?.kick(id, now)?;
-        self.disconnect_where(|member| member.id == id);
-        Ok(())
-    }
-
-    pub fn revoke_code(&self, id: &str, now: u64) -> Result<(), ChangeError> {
-        self.require_store()?.revoke_code(id, now)?;
-        self.disconnect_where(|member| member.code.as_deref() == Some(id));
-        Ok(())
-    }
-
-    pub fn add_ban(&self, target: BanTarget, note: &str, now: u64) -> Result<Ban, ChangeError> {
-        let ban = self.require_store()?.add_ban(target, note, now)?;
-        self.disconnect_where(|member| {
-            member.peer.is_some_and(|peer| ban.target.covers_ip(peer))
-                || ban.target.covers_device(member.device.as_deref())
-        });
-        Ok(ban)
     }
 
     fn require_store(&self) -> Result<&Arc<Store>, ChangeError> {
         self.store.as_ref().ok_or(ChangeError::NotFound)
     }
-}
 
-fn member_view(net: &Network, client_id: &str, lease: &Lease) -> MemberView {
-    MemberView {
-        id: client_key(client_id),
-        network: net.name.clone(),
-        hostname: lease.hostname.clone(),
-        ip: lease.ip,
-        peer: lease.details.peer,
-        device: lease.details.device.clone(),
-        code: lease.details.code.clone(),
-        since: lease.details.since,
+    /// Ends this run of the client. Whether it can come back after being started
+    /// again depends on its Code.
+    pub fn kick_member(
+        &self,
+        workspace: WorkspaceId,
+        id: &str,
+        now: u64,
+    ) -> Result<MemberView, ChangeError> {
+        let member = self
+            .members(workspace)
+            .into_iter()
+            .find(|member| member.id == id)
+            .ok_or(ChangeError::NotFound)?;
+        self.require_store()?
+            .kick(workspace, id, &member.hostname, now)?;
+        if let Some(network) = self.network(workspace) {
+            network.disconnect_where(&|member| member.id == id);
+        }
+        Ok(member)
+    }
+
+    pub fn revoke_code(
+        &self,
+        workspace: WorkspaceId,
+        id: &str,
+        now: u64,
+    ) -> Result<(), ChangeError> {
+        self.require_store()?.revoke_code(workspace, id, now)?;
+        self.disconnect_code(workspace, id);
+        Ok(())
+    }
+
+    pub fn delete_code(&self, workspace: WorkspaceId, id: &str) -> Result<(), ChangeError> {
+        self.require_store()?.delete_code(workspace, id)?;
+        self.disconnect_code(workspace, id);
+        Ok(())
+    }
+
+    fn disconnect_code(&self, workspace: WorkspaceId, id: &str) {
+        if let Some(network) = self.network(workspace) {
+            network.disconnect_where(&|member| member.code.as_deref() == Some(id));
+        }
+    }
+
+    /// A workspace's ban touches only its own members; `None` reaches all of them.
+    pub fn add_ban(
+        &self,
+        workspace: Option<WorkspaceId>,
+        target: BanTarget,
+        note: &str,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> Result<Ban, ChangeError> {
+        let ban = self
+            .require_store()?
+            .add_ban(workspace, target, note, expires_at, now)?;
+        let networks = match workspace {
+            Some(id) => self.network(id).into_iter().collect(),
+            None => self.all_networks(),
+        };
+        for network in networks {
+            network.disconnect_where(&|member| {
+                member.peer.is_some_and(|peer| ban.target.covers_ip(peer))
+                    || ban.target.covers_device(member.device.as_deref())
+            });
+        }
+        Ok(ban)
     }
 }
 
@@ -440,22 +559,17 @@ fn publish_members(net: &Network, state: &State) {
 mod tests {
     use super::*;
 
-    const A: Secret = [1; 32];
-    const B: Secret = [2; 32];
+    fn workspace(id: WorkspaceId, cidr: &str) -> Workspace {
+        Workspace {
+            id,
+            name: format!("w{id}"),
+            cidr: cidr.into(),
+            created_at: 0,
+        }
+    }
 
     fn hub() -> Hub {
-        Hub::new(vec![
-            NetworkConfig {
-                name: "a".into(),
-                cidr: "10.1.0.0/24".parse().unwrap(),
-                secrets: vec![A],
-            },
-            NetworkConfig {
-                name: "b".into(),
-                cidr: "10.2.0.0/30".parse().unwrap(),
-                secrets: vec![B],
-            },
-        ])
+        Hub::new(&[workspace(0, "10.1.0.0/24"), workspace(1, "10.2.0.0/30")])
     }
 
     fn packet(src: Ipv4Addr, dst: Ipv4Addr) -> Bytes {
@@ -466,16 +580,8 @@ mod tests {
         p.into()
     }
 
-    fn join(hub: &Hub, net: usize, id: &str) -> Session {
+    fn join(hub: &Hub, net: WorkspaceId, id: &str) -> Session {
         hub.join(net, id, id, None, Instant::now()).unwrap()
-    }
-
-    #[test]
-    fn secrets_select_their_network_and_others_fail() {
-        let hub = hub();
-        assert_eq!(hub.authenticate(&A), Some(0));
-        assert_eq!(hub.authenticate(&B), Some(1));
-        assert_eq!(hub.authenticate(&[3; 32]), None);
     }
 
     #[test]
@@ -483,7 +589,10 @@ mod tests {
         let hub = hub();
         let a = join(&hub, 0, "a");
         let mut b = join(&hub, 0, "b");
-        assert_eq!(hub.forward(0, a.ip, packet(a.ip, b.ip)), Forward::Sent);
+        assert_eq!(
+            hub.network(0).unwrap().forward(a.ip, packet(a.ip, b.ip)),
+            Forward::Sent
+        );
         assert!(b.rx.try_recv().is_ok());
     }
 
@@ -493,7 +602,10 @@ mod tests {
         let a = join(&hub, 0, "a");
         let mut b = join(&hub, 0, "b");
         let forged = packet(Ipv4Addr::new(10, 1, 0, 200), b.ip);
-        assert_eq!(hub.forward(0, a.ip, forged), Forward::SpoofedSource);
+        assert_eq!(
+            hub.network(0).unwrap().forward(a.ip, forged),
+            Forward::SpoofedSource
+        );
         assert!(b.rx.try_recv().is_err());
     }
 
@@ -503,7 +615,9 @@ mod tests {
         let a = join(&hub, 0, "a");
         let mut other = join(&hub, 1, "x");
         assert_eq!(
-            hub.forward(0, a.ip, packet(a.ip, other.ip)),
+            hub.network(0)
+                .unwrap()
+                .forward(a.ip, packet(a.ip, other.ip)),
             Forward::NoRoute
         );
         assert!(other.rx.try_recv().is_err());
@@ -523,14 +637,17 @@ mod tests {
             a.ip,
         ] {
             assert_eq!(
-                hub.forward(0, a.ip, packet(a.ip, dst)),
+                hub.network(0).unwrap().forward(a.ip, packet(a.ip, dst)),
                 Forward::NoRoute,
                 "{dst}"
             );
         }
         let mut v6 = packet(a.ip, a.ip).to_vec();
         v6[0] = 0x60;
-        assert_eq!(hub.forward(0, a.ip, v6.into()), Forward::NotIpv4);
+        assert_eq!(
+            hub.network(0).unwrap().forward(a.ip, v6.into()),
+            Forward::NotIpv4
+        );
     }
 
     #[test]
@@ -539,9 +656,15 @@ mod tests {
         let a = join(&hub, 0, "a");
         let b = join(&hub, 0, "stuck");
         for _ in 0..SESSION_QUEUE {
-            assert_eq!(hub.forward(0, a.ip, packet(a.ip, b.ip)), Forward::Sent);
+            assert_eq!(
+                hub.network(0).unwrap().forward(a.ip, packet(a.ip, b.ip)),
+                Forward::Sent
+            );
         }
-        assert_eq!(hub.forward(0, a.ip, packet(a.ip, b.ip)), Forward::QueueFull);
+        assert_eq!(
+            hub.network(0).unwrap().forward(a.ip, packet(a.ip, b.ip)),
+            Forward::QueueFull
+        );
     }
 
     #[test]
@@ -610,7 +733,10 @@ mod tests {
         assert_eq!(old.ip, new.ip);
         // Old connection finishes dying after the replacement arrived.
         hub.leave(&old, Instant::now());
-        assert_eq!(hub.forward(0, a.ip, packet(a.ip, new.ip)), Forward::Sent);
+        assert_eq!(
+            hub.network(0).unwrap().forward(a.ip, packet(a.ip, new.ip)),
+            Forward::Sent
+        );
         assert!(new.rx.try_recv().is_ok());
     }
 
@@ -636,5 +762,68 @@ mod tests {
         assert_eq!(sanitize_hostname("ok\n\x1b[31mfake"), "ok[31mfake");
         assert_eq!(sanitize_hostname("  \n"), "unknown");
         assert_eq!(sanitize_hostname(&"x".repeat(500)).len(), MAX_HOSTNAME);
+    }
+
+    #[test]
+    fn identical_ranges_in_two_workspaces_stay_apart() {
+        let hub = Hub::new(&[workspace(0, "10.1.0.0/24"), workspace(1, "10.1.0.0/24")]);
+        let a = join(&hub, 0, "a");
+        let mut b = join(&hub, 1, "b");
+        assert_eq!(a.ip, b.ip, "same range, same first address");
+        let other = join(&hub, 0, "c");
+        let net = hub.network(0).unwrap();
+        assert_eq!(net.forward(a.ip, packet(a.ip, other.ip)), Forward::Sent);
+        assert!(b.rx.try_recv().is_err());
+        assert_eq!(hub.members(0).len(), 2);
+        assert_eq!(hub.members(1).len(), 1);
+    }
+
+    #[test]
+    fn removing_a_network_disconnects_and_forgets_it() {
+        let hub = hub();
+        let a = join(&hub, 0, "a");
+        hub.remove_network(0);
+        assert!(hub.network(0).is_none());
+        assert_eq!(
+            hub.join(0, "x", "x", None, Instant::now()).err(),
+            Some(RejectReason::InvalidCredential)
+        );
+        let notified = a.kick.notified();
+        tokio::pin!(notified);
+        assert!(notified.as_mut().enable(), "the member was told to go");
+    }
+
+    #[test]
+    fn a_new_range_disconnects_members_and_gives_addresses_inside_it() {
+        let hub = hub();
+        let a = join(&hub, 0, "a");
+        hub.replace_network(&workspace(0, "10.9.0.0/24"));
+        let notified = a.kick.notified();
+        tokio::pin!(notified);
+        assert!(notified.as_mut().enable());
+        // The old address is not honoured: it is outside the new range.
+        let back = hub.join(0, "a", "a", Some(a.ip), Instant::now()).unwrap();
+        assert_eq!(back.ip, Ipv4Addr::new(10, 9, 0, 1));
+        // A late goodbye from the old network does not disturb the new one.
+        hub.leave(&a, Instant::now());
+        assert_eq!(hub.members(0).len(), 1);
+    }
+
+    #[test]
+    fn renaming_applies_without_disconnecting() {
+        let hub = hub();
+        let a = join(&hub, 0, "a");
+        hub.rename_network(0, "renamed");
+        assert_eq!(join(&hub, 0, "b").network_name, "renamed");
+        assert_eq!(a.network_name, "w0");
+    }
+
+    #[test]
+    fn stats_count_members_and_capacity() {
+        let hub = hub();
+        let _a = join(&hub, 0, "a");
+        let stats = hub.stats();
+        let first = stats.iter().find(|s| s.workspace_id == 0).unwrap();
+        assert_eq!((first.online, first.capacity), (1, 254));
     }
 }

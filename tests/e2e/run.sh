@@ -36,31 +36,9 @@ for n in "${NODES[@]}"; do
     ${tun[@]+"${tun[@]}"} -v "$VOL:/target:ro" \
     "$IMG" sleep infinity >/dev/null
 done
-docker exec -i varco-srv bash -c 'mkdir -p /etc/varco && cat > /etc/varco/config.toml' <<CFG
-listen = "0.0.0.0:$PORT"
-public_addr = "varco-srv:$PORT"
-[admin]
-listen = "127.0.0.1:8444"
-username = "e2e-admin"
-password = "e2e-console-password"
-[[network]]
-name = "a"
-cidr = "10.77.1.0/24"
-[[network]]
-name = "b"
-cidr = "10.77.2.0/24"
-CFG
-
 BIN=/target/debug/varco
-gen() { ex srv "$BIN server gen-credential --network $1"; }
-OUT_A=$(gen a); OUT_B=$(gen b)
-secret() { echo "$1" | sed -n 2p | tr -d ' "'; }
-code()   { echo "$1" | sed -n 4p | tr -d ' '; }
-CODE_A=$(code "$OUT_A"); CODE_B=$(code "$OUT_B")
-ex srv "sed -i '/name = \"a\"/a credentials = [\"$(secret "$OUT_A")\"]' /etc/varco/config.toml
-        sed -i '/name = \"b\"/a credentials = [\"$(secret "$OUT_B")\"]' /etc/varco/config.toml"
-
-start_server() { docker exec -d varco-srv bash -c "$BIN server -c /etc/varco/config.toml >>/tmp/server.log 2>&1"; }
+DATA=/var/lib/varco
+start_server() { docker exec -d varco-srv bash -c "$BIN server --data-dir $DATA >>/tmp/server.log 2>&1"; }
 stop_server()  { ex srv "pkill -x varco"; }
 join() { docker exec -d -e "VARCO_CREDENTIAL=$2" "varco-$1" bash -c "$BIN >>/tmp/client.log 2>&1"; }
 mesh_ip() { ex "$1" "ip -4 -o addr | awk '\$2!=\"lo\" && \$2!=\"eth0\" {print \$4}' | cut -d/ -f1 | head -1"; }
@@ -68,7 +46,45 @@ wait_ip() { for _ in $(seq 60); do local ip; ip=$(mesh_ip "$1"); [ -n "$ip" ] &&
 ping1() { ex "$1" "ping -c1 -W2 $2"; }
 wait_ping() { for _ in $(seq "${3:-60}"); do ping1 "$1" "$2" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
 
-start_server; sleep 1
+# The console, as a person would drive it. ADMIN can point at another instance.
+ADMIN=8444; COOKIES=/tmp/console.cookies
+api() {
+  local method=$1 path=$2 body=${3:-'{}'}
+  if [ "$method" = GET ]; then
+    docker exec varco-srv curl -s -b "$COOKIES" "http://127.0.0.1:$ADMIN/api/$path"
+  else
+    docker exec varco-srv curl -s -b "$COOKIES" -c "$COOKIES" -X "$method" \
+      -H 'Content-Type: application/json' -d "$body" "http://127.0.0.1:$ADMIN/api/$path"
+  fi
+}
+status() {
+  local method=$1 path=$2 body=${3:-'{}'}
+  docker exec varco-srv curl -s -o /dev/null -w '%{http_code}' -b "$COOKIES" -c "$COOKIES" -X "$method" \
+    -H 'Content-Type: application/json' -d "$body" "http://127.0.0.1:$ADMIN/api/$path"
+}
+field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+number() { sed -n "s/.*\"$1\":\([0-9]*\).*/\1/p"; }
+new_code() { local body=${2:-}; [ -n "$body" ] || body='{}'; api POST "w/$1/codes" "$body" | field code; }
+wait_console() { for _ in $(seq 40); do docker exec varco-srv curl -sf -o /dev/null "http://127.0.0.1:$ADMIN/healthz" && return 0; sleep 0.25; done; return 1; }
+
+echo "== first run"
+start_server
+wait_console || { ex srv 'cat /tmp/server.log'; exit 1; }
+[ "$(status POST login '{"username":"root","password":"wrong"}')" = 401 ] && ok "a wrong password is refused" || bad "a wrong password was accepted"
+[ "$(status POST login '{"username":"root","password":"admin"}')" = 204 ] && ok "the default account logs in" || bad "the default account did not log in"
+[ "$(docker exec varco-srv curl -s -o /dev/null -w '%{http_code}' -b "$COOKIES" "http://127.0.0.1:$ADMIN/api/workspaces")" = 403 ] && ok "nothing opens before the password is changed" || bad "the console opened with the default password"
+refuse "the relay does not listen before it is set up" ex srv "nc -z -w1 127.0.0.1 $PORT"
+[ "$(status POST me/password '{"password":"admin"}')" = 204 ] && ok "the new password may equal the old one" || bad "the same password was refused"
+SETTINGS="{\"public_addr\":\"varco-srv:$PORT\",\"relay_listen\":\"0.0.0.0:$PORT\"}"
+[ "$(status PUT settings "$SETTINGS")" = 204 ] && ok "the relay can be set up" || bad "relay setup failed"
+sleep 0.5
+check  "the relay now listens" ex srv "nc -z -w1 127.0.0.1 $PORT"
+WS_A=$(api POST workspaces '{"name":"a","cidr":"10.77.1.0/24"}' | number id)
+WS_B=$(api POST workspaces '{"name":"b","cidr":"10.77.2.0/24"}' | number id)
+[ -n "$WS_A" ] && [ -n "$WS_B" ] || { echo "no workspaces created"; ex srv 'cat /tmp/server.log'; exit 1; }
+CODE_A=$(new_code "$WS_A"); CODE_B=$(new_code "$WS_B")
+[ -n "$CODE_A" ] && [ -n "$CODE_B" ] || { echo "no Codes created"; exit 1; }
+
 echo "== join"
 join a1 "$CODE_A"; join a2 "$CODE_A"; join a3 "$CODE_A"; join b1 "$CODE_B"
 IP_A1=$(wait_ip a1); IP_A2=$(wait_ip a2); IP_A3=$(wait_ip a3); IP_B1=$(wait_ip b1)
@@ -99,16 +115,25 @@ echo "== rejected joins (run in b1 as a one-off process, which must exit by itse
 attempt() { docker exec -e "VARCO_CREDENTIAL=$1" varco-b1 timeout 20 "$BIN" 2>&1; }
 expect_msg() { local name=$1 code=$2 pattern=$3; local out; out=$(attempt "$code"); local rc=$?
   if [ "$rc" = 1 ] && echo "$out" | grep -q "$pattern"; then ok "$name"; else bad "$name (rc=$rc: $out)"; fi; }
-# Issued for network a but never added to the config.
-UNLISTED=$(code "$(gen a)")
-expect_msg "unlisted secret is rejected"   "$UNLISTED" "无效或已被撤销"
+REVOKED_REPLY=$(api POST "w/$WS_A/codes" '{"note":"to revoke"}')
+UNLISTED=$(echo "$REVOKED_REPLY" | field code)
+api POST "w/$WS_A/codes/$(echo "$REVOKED_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')/revoke" >/dev/null
+expect_msg "revoked Code is rejected"      "$UNLISTED" "无效或已被撤销"
 expect_msg "malformed code is rejected"    "garbage"   "格式不正确"
 # A different server key gives a valid code whose pin does not match this server.
-ex srv "mkdir -p /tmp/other && cp /etc/varco/config.toml /tmp/other/config.toml"
-WRONG_PIN=$(code "$(ex srv "$BIN server -c /tmp/other/config.toml gen-credential --network a")")
+docker exec -d varco-srv bash -c "$BIN server --data-dir /tmp/other --admin-listen 127.0.0.1:8445 >>/tmp/other.log 2>&1"
+ADMIN=8445; COOKIES=/tmp/other.cookies
+wait_console
+status POST login '{"username":"root","password":"admin"}' >/dev/null
+status POST me/password '{"password":"x"}' >/dev/null
+status PUT settings "{\"public_addr\":\"varco-srv:$PORT\"}" >/dev/null
+OTHER_WS=$(api POST workspaces '{"name":"other","cidr":"10.88.0.0/24"}' | number id)
+WRONG_PIN=$(new_code "$OTHER_WS")
+ex srv "pkill -f 'data-dir /tmp/other'; true"
+ADMIN=8444; COOKIES=/tmp/console.cookies
 expect_msg "wrong pin (simulated MITM) is rejected" "$WRONG_PIN" "证书与 Code 不符"
 REFUSED=$(ex srv "grep -c 'connection rejected' /tmp/server.log")
-[ "$REFUSED" = 1 ] && ok "only the unlisted secret reached the server's auth step" \
+[ "$REFUSED" = 1 ] && ok "only the revoked secret reached the server's auth step" \
                    || bad "expected 1 auth rejection, got $REFUSED"
 
 echo "== inner TCP survives a 60 s outage"
@@ -310,13 +335,17 @@ IP_T=$(wait_tool_ip)
 stop_tool
 
 # Another server is the same as a network redirecting the address: the pin must hold.
-docker exec varco-srv cat /etc/varco/config.toml | sed "s/0.0.0.0:$PORT/0.0.0.0:9443/; s/varco-srv:$PORT/varco-a2:9443/" | docker exec -i varco-a2 bash -c "mkdir -p /tmp/other; cat > /tmp/other/config.toml"
-docker exec -d varco-a2 bash -c "cd /tmp/other && $BIN server -c /tmp/other/config.toml >/tmp/other/server.log 2>&1"
+docker exec -d varco-a2 bash -c "mkdir -p /tmp/other; $BIN server --data-dir /tmp/other/data --admin-listen 127.0.0.1:8445 >/tmp/other/server.log 2>&1"
 sleep 2
+ex a2 "J='Content-Type: application/json'; U=http://127.0.0.1:8445/api; C=/tmp/other/cookies
+  curl -s -c \$C -H \"\$J\" -d '{\"username\":\"root\",\"password\":\"admin\"}' \$U/login
+  curl -s -b \$C -H \"\$J\" -d '{\"password\":\"x\"}' \$U/me/password
+  curl -s -b \$C -H \"\$J\" -X PUT -d '{\"public_addr\":\"varco-a2:9443\",\"relay_listen\":\"0.0.0.0:9443\"}' \$U/settings"
+sleep 1
 ex s1 "timeout 15 $TOOL --code $CODE_A --ssh-pubkey '$PUBKEY' --server varco-a2 --port 9443 </dev/null >/tmp/pin.log 2>&1"
 check  "--server cannot bypass the certificate pin" ex s1 "grep -q '证书' /tmp/pin.log"
 refuse "and nothing joined that server" ex a2 "grep -q 'member online' /tmp/other/server.log"
-ex a2 "pkill -f 'server -c /tmp/other/config.toml'; true"
+ex a2 "pkill -f 'data-dir /tmp/other/data'; true"
 
 write_conf <<CONF_END
 cod = "$CODE_A"
@@ -344,13 +373,10 @@ refuse "ssh with another key is refused" ex a1 "ssh -i /tmp/other -o IdentitiesO
 stop_code
 check  "the Code without the key still works" wait_ping a1 "$IP_A2" 30
 
-OUT_K=$(ex srv "$BIN server -c /etc/varco/config.toml gen-credential --network a --ssh-pubkey '$PUBKEY'")
-CODE_K=$(code "$OUT_K")
-ex srv "sed -i '/name = \"a\"/{n;s|credentials = \[|credentials = [\"$(secret "$OUT_K")\", |}' /etc/varco/config.toml"
-stop_server; sleep 2; start_server; sleep 3
+CODE_K=$(api POST "w/$WS_A/codes" "{\"ssh_pubkey\":\"$PUBKEY\"}" | field code)
 start_code "$CODE_K"
 IP_J=$(wait_code_ip)
-[ "$(sshc "$IP_J" 'echo from-gen' 2>/dev/null)" = "from-gen" ] && ok "gen-credential --ssh-pubkey makes a working Code" || { bad "gen-credential Code failed"; ex s1 "cat /tmp/joint.log"; }
+[ "$(sshc "$IP_J" 'echo from-gen' 2>/dev/null)" = "from-gen" ] && ok "the console makes a working Code with a key" || { bad "the console's Code with a key failed"; ex s1 "cat /tmp/joint.log"; }
 stop_code
 
 ex a1 "$BIN code add-ssh-key --code $CODE_A --ssh-pubkey /tmp/id >/tmp/priv.log 2>&1"
@@ -359,79 +385,104 @@ refuse "and is not printed" ex a1 "grep -q 'PRIVATE\|^b3Blbn' /tmp/priv.log"
 ex a1 "VARCO_CREDENTIAL=varco1.AAAA $BIN >/tmp/old.log 2>&1"
 check  "the old Code format is refused" ex a1 "grep -q '格式不正确' /tmp/old.log"
 
-echo "== admin console"
-api() {
-  local method=$1 path=$2 body=${3:-'{}'}
-  if [ "$method" = GET ]; then
-    docker exec varco-srv curl -s -b /tmp/console.cookies "http://127.0.0.1:8444/api/$path"
-  else
-    docker exec varco-srv curl -s -b /tmp/console.cookies -c /tmp/console.cookies -X "$method" \
-      -H 'Content-Type: application/json' -d "$body" -w '%{http_code}' "http://127.0.0.1:8444/api/$path"
-  fi
-}
-field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
-member_field() { api GET members | sed 's/},{/}\n{/g' | grep "\"hostname\":\"$1\"" | field "$2"; }
+echo "== console: Codes, kicks and bans"
+member_field() { api GET "w/$WS_A/members" | sed 's/},{/}\n{/g' | grep "\"hostname\":\"$1\"" | field "$2"; }
 stop_a3() { ex a3 "pkill -x varco; true"; for _ in $(seq 30); do [ -z "$(mesh_ip a3)" ] && return 0; sleep 0.5; done; return 1; }
 a3_exits_with() { for _ in $(seq 60); do
     ex a3 "pgrep -x varco" >/dev/null || { ex a3 "tail -3 /tmp/client.log" | grep -q "$1"; return; }
     sleep 0.5; done; return 1; }
 join_a3() { join a3 "$1"; IP_A3=$(wait_ip a3); [ -n "$IP_A3" ] && wait_ping a1 "$IP_A3" 20; }
+item_id() { sed -n 's/.*"id":"\([^"]*\)".*/\1/p'; }
 
-[ "$(api POST login '{"username":"e2e-admin","password":"wrong"}' | tail -c 3)" = 401 ] && ok "a wrong password is refused" || bad "a wrong password was accepted"
-check  "the API needs a session" bash -c "[ \"\$(docker exec varco-srv curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8444/api/members)\" = 401 ]"
-[ "$(api POST login '{"username":"e2e-admin","password":"e2e-console-password"}')" = 204 ] && ok "the configured account logs in" || bad "login failed"
 check  "the page is served" ex srv "curl -s http://127.0.0.1:8444/ | grep -q 'varco 管理后台'"
-
 stop_a3
 # The image has no machine id of its own; this stands in for a real machine's.
 ex a3 "echo 0123456789abcdef0123456789abcdef > /etc/machine-id"
-ONCE=$(api POST codes '{"network":"a","kind":"once","note":"e2e"}' | field code)
+ONCE=$(new_code "$WS_A" '{"max_uses":1,"note":"e2e"}')
 join_a3 "$ONCE" && ok "a once Code joins with no server restart" || bad "the once Code did not join"
 sleep 1
-expect_msg "a second device is refused the once Code" "$ONCE" "已被使用"
-stop_server; sleep 2; start_server; sleep 1
-check  "its device comes back after a server restart" wait_ping a1 "$IP_A3" 40
+expect_msg "a second run is refused the once Code" "$ONCE" "已被使用"
+stop_server; sleep 2; start_server; wait_console
+check  "its client comes back after a server restart" wait_ping a1 "$IP_A3" 40
+[ "$(status GET me)" != 401 ] && ok "the login survives a server restart" || bad "logged out by a restart"
 expect_msg "and it is still refused to others" "$ONCE" "已被使用"
-[ "$(api POST login '{"username":"e2e-admin","password":"e2e-console-password"}')" = 204 ] || bad "login after restart failed"
 
-api POST members/kick "{\"id\":\"$(member_field a3 id)\"}" >/dev/null
+api POST "w/$WS_A/members/kick" "{\"id\":\"$(member_field a3 id)\"}" >/dev/null
 a3_exits_with "已被管理员移出" && ok "a kicked client stops instead of reconnecting" || bad "the kicked client did not stop"
 expect_msg "a kick does not refund the once Code" "$ONCE" "已被使用"
 
-TIMED_REPLY=$(api POST codes '{"network":"a","kind":"timed","duration":"1h"}')
-TIMED=$(echo "$TIMED_REPLY" | field code); TIMED_ID=$(echo "$TIMED_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+TIMED_REPLY=$(api POST "w/$WS_A/codes" '{"duration":"1h"}')
+TIMED=$(echo "$TIMED_REPLY" | field code); TIMED_ID=$(echo "$TIMED_REPLY" | item_id)
 stop_a3
 join_a3 "$TIMED" && ok "a timed Code joins" || bad "the timed Code did not join"
 DEVICE=$(member_field a3 device)
 [ -n "$DEVICE" ] && ok "the device id is reported from the machine id" || bad "no device id reported"
-BAN_REPLY=$(api POST bans "{\"kind\":\"device\",\"value\":\"$DEVICE\"}")
-BAN_ID=$(echo "$BAN_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+BAN_ID=$(api POST "w/$WS_A/bans" "{\"kind\":\"device\",\"value\":\"$DEVICE\"}" | item_id)
 a3_exits_with "已被管理员移出" && ok "banning the device removes it" || bad "the banned device stayed"
 join a3 "$CODE_A"
 a3_exits_with "已被管理员移出" && ok "the banned device stays out with another Code" || bad "the banned device got back in"
-api DELETE "bans/$BAN_ID" >/dev/null
+stop_a3
+docker exec -d -e "VARCO_CREDENTIAL=$CODE_B" varco-a3 bash -c "$BIN >>/tmp/client.log 2>&1"
+if [ -n "$(wait_ip a3)" ]; then ok "the same device is welcome in another workspace"; else bad "a workspace's ban reached another"; fi
+stop_a3
+api DELETE "w/$WS_A/bans/$BAN_ID" >/dev/null
 join_a3 "$TIMED" && ok "lifting the ban lets it back" || bad "still out after the ban was lifted"
 
 A3_ETH=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' varco-a3)
-BAN_REPLY=$(api POST bans "{\"kind\":\"ip\",\"value\":\"$A3_ETH\"}")
-BAN_ID=$(echo "$BAN_REPLY" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-refuse "banning its address cuts it off" bash -c "sleep 2; docker exec varco-a1 ping -c1 -W2 $IP_A3"
+BAN_ID=$(api POST bans "{\"kind\":\"ip\",\"value\":\"$A3_ETH\"}" | item_id)
+refuse "a global address ban cuts it off" bash -c "sleep 2; docker exec varco-a1 ping -c1 -W2 $IP_A3"
 check  "and the client keeps trying without being told why" ex a3 "pgrep -x varco"
 api DELETE "bans/$BAN_ID" >/dev/null
 check  "lifting the address ban restores it" wait_ping a1 "$IP_A3" 40
 
-api POST "codes/$TIMED_ID/revoke" >/dev/null
+api POST "w/$WS_A/codes/$TIMED_ID/revoke" >/dev/null
 a3_exits_with "无效或已被撤销" && ok "revoking a Code removes who came with it" || bad "the revoked Code's client stayed"
 
-check  "the state file is private" bash -c "[ \"\$(docker exec varco-srv stat -c %a /etc/varco/varco-state.json)\" = 600 ]"
-refuse "no Code in the state file"    ex srv "grep -qF '$ONCE' /etc/varco/varco-state.json"
-refuse "no Code in the server log"    ex srv "grep -qF '$ONCE' /tmp/server.log"
-refuse "no password in the server log" ex srv "grep -qF 'e2e-console-password' /tmp/server.log"
+echo "== console: workspaces and accounts"
+WS_C=$(api POST workspaces '{"name":"team-c","cidr":"10.77.1.0/24","owner_username":"carol","owner_password":"first"}' | number id)
+[ -n "$WS_C" ] && ok "a workspace can be created with its owner while running" || bad "the workspace was not created"
+ADMIN=8444; ROOT_COOKIES=$COOKIES; COOKIES=/tmp/carol.cookies
+[ "$(status POST login '{"username":"carol","password":"first"}')" = 204 ] && ok "its owner logs in" || bad "its owner did not log in"
+status POST me/password '{"password":"chosen"}' >/dev/null
+[ "$(status GET "w/$WS_C/members")" = 200 ] && ok "an owner reaches their workspace" || bad "an owner was refused their workspace"
+[ "$(status GET "w/$WS_A/members")" = 404 ] && ok "and no other, which appears not to exist" || bad "an owner reached another workspace"
+[ "$(status GET workspaces)" = 403 ] && ok "and nothing of the super administrator's" || bad "an owner reached the workspace list"
+CODE_C=$(new_code "$WS_C")
+stop_a3
+join a3 "$CODE_C"
+IP_C=$(wait_ip a3)
+[ -n "$IP_C" ] && ok "their Code joins their network" || bad "their Code did not join"
+TOKEN=$(api POST "w/$WS_C/tokens" '{"name":"e2e"}' | field token)
+COOKIES=$ROOT_COOKIES
+# Its addresses are also in use in workspace a. The one member here has only itself
+# to reach, so anything answering would have come from the other workspace.
+[ "$IP_C" != "$IP_A2" ] || bad "expected different addresses for this check"
+refuse "a same-range workspace is unreachable" ping1 a3 "$IP_A2"
+if ex a3 "ip -4 -o addr | grep -q ' $IP_C/'"; then ok "the same address exists in both"; else bad "a3 does not hold its address"; fi
+bearer() { docker exec varco-srv curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $1" "http://127.0.0.1:$ADMIN$2"; }
+[ "$(bearer "$TOKEN" "/api/w/$WS_C/members")" = 200 ] && ok "a workspace token works there" || bad "the workspace token was refused"
+[ "$(bearer "$TOKEN" "/api/w/$WS_A/members")" = 404 ] && ok "and nowhere else" || bad "the workspace token reached another workspace"
+[ "$(bearer "$TOKEN" /metrics)" = 403 ] && ok "and not on metrics" || bad "the workspace token read metrics"
+ROOT_TOKEN=$(api POST tokens '{"name":"e2e-root"}' | field token)
+check  "a super token reads metrics" ex srv "curl -s -H 'Authorization: Bearer $ROOT_TOKEN' http://127.0.0.1:$ADMIN/metrics | grep -q 'varco_members_online{workspace=\"team-c\"} 1'"
+check  "health needs no login" ex srv "curl -s http://127.0.0.1:$ADMIN/healthz | grep -q 'relay_listening\":true'"
+api DELETE "workspaces/$WS_C" >/dev/null
+a3_exits_with "无效或已被撤销" && ok "deleting a workspace stops its clients" || bad "the deleted workspace's client stayed"
+check  "and leaves the others alone" wait_ping a1 "$IP_A2" 10
+[ "$(api GET "w/$WS_A/connections" | number total)" -gt 0 ] && ok "connections are in the history" || bad "no connection history"
+
+check  "the database is private" bash -c "[ \"\$(docker exec varco-srv stat -c %a $DATA/varco.db)\" = 600 ]"
+refuse "no Code in the database"       ex srv "grep -aqF '$ONCE' $DATA/varco.db"
+refuse "no password in the database"   ex srv "grep -aqF 'chosen' $DATA/varco.db"
+refuse "no Code in the server log"     ex srv "grep -qF '$ONCE' /tmp/server.log"
+refuse "no password in the server log" ex srv "grep -qF 'chosen' /tmp/server.log"
+docker exec varco-srv $BIN server --data-dir $DATA reset-root-password >/dev/null
+[ "$(status GET me)" = 401 ] && ok "resetting the root password ends its logins" || bad "root stayed logged in after a reset"
+[ "$(status POST login '{"username":"root","password":"admin"}')" = 204 ] && ok "and restores the default" || bad "the default did not come back"
 
 echo "== secrets stay out of logs"
-SECRET_VALUE=$(secret "$OUT_A")
-refuse "secret absent from server log" ex srv "grep -qF '$SECRET_VALUE' /tmp/server.log"
-refuse "secret absent from client log" ex a1  "grep -qF '$SECRET_VALUE' /tmp/client.log"
+refuse "Code absent from server log" ex srv "grep -qF '$CODE_A' /tmp/server.log"
+refuse "Code absent from client log" ex a1  "grep -qF '$CODE_A' /tmp/client.log"
 
 echo
 echo "server log excerpt:"; ex srv "tail -5 /tmp/server.log"

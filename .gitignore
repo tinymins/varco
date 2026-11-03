@@ -3,7 +3,6 @@ dist/
 .DS_Store
 
 # Deployment-specific: real addresses, ports and credentials stay out of Git.
-# config.example.toml is the committed template.
 /config.toml
 *.local.toml
 *.key

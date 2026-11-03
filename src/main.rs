@@ -46,10 +46,14 @@ enum Command {
         #[command(subcommand)]
         action: CodeAction,
     },
-    /// 运行服务端
+    /// 运行服务端，打开管理后台完成初始化
     Server {
-        #[arg(short, long, default_value = "/etc/varco/config.toml")]
-        config: PathBuf,
+        /// 数据目录，也可用环境变量 VARCO_DATA_DIR
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+        /// 管理后台监听地址，也可用环境变量 VARCO_ADMIN_LISTEN
+        #[arg(long, value_name = "ADDR")]
+        admin_listen: Option<String>,
         #[command(subcommand)]
         action: Option<ServerAction>,
     },
@@ -64,14 +68,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ServerAction {
-    /// 为某个网络生成新凭证
-    GenCredential {
-        #[arg(long)]
-        network: String,
-        /// 编进 Code 的 SSH 公钥（文件路径或公钥文本），对方点确认后自动开启 SSH
-        #[arg(long, value_name = "KEY")]
-        ssh_pubkey: Option<String>,
-    },
+    /// 把 root 的密码恢复成默认值，下次登录时必须修改
+    ResetRootPassword,
 }
 
 #[derive(Subcommand)]
@@ -175,30 +173,22 @@ fn main() -> Result<ExitCode> {
             run_client(&runtime, args.cli, launch::load(options, environment))
         }
         Some(Command::Server {
-            config,
-            action: None,
+            data_dir,
+            admin_listen,
+            action,
         }) => {
-            runtime.block_on(varco::server::run_from_config(&config))?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Some(Command::Server {
-            config,
-            action:
-                Some(ServerAction::GenCredential {
-                    network,
-                    ssh_pubkey,
-                }),
-        }) => {
-            let key = ssh_pubkey.as_deref().map(read_public_key).transpose()?;
-            let shown_key = key.as_ref().map(store::fingerprint);
-            let (secret, credential) = varco::server::generate_credential(&config, &network, key)?;
-            println!("1. 把下面这行加入配置里 {network} 的 credentials，然后重启服务端：");
-            println!("   \"{secret}\"");
-            println!("2. 把下面的 Code 发给对方：");
-            println!("   {credential}");
-            if let Some(shown_key) = shown_key {
-                println!("对方点确认后，持有这把私钥的人能远程控制对方电脑：{shown_key}");
+            let data_dir = data_dir
+                .or_else(|| std::env::var_os("VARCO_DATA_DIR").map(PathBuf::from))
+                .unwrap_or_else(varco::server::default_data_dir);
+            if matches!(action, Some(ServerAction::ResetRootPassword)) {
+                varco::server::open_store(&data_dir)?.reset_root_password()?;
+                println!("root 的密码已恢复为默认值，下次登录时必须修改。");
+                return Ok(ExitCode::SUCCESS);
             }
+            let admin_listen = admin_listen
+                .or_else(|| std::env::var("VARCO_ADMIN_LISTEN").ok())
+                .unwrap_or_else(|| varco::server::DEFAULT_ADMIN_LISTEN.to_owned());
+            runtime.block_on(varco::server::run(&data_dir, &admin_listen))?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Code {

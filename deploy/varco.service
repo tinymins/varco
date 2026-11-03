@@ -4,17 +4,18 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/varco server -c /etc/varco/config.toml
+ExecStart=/usr/local/bin/varco server --data-dir /var/lib/varco
 Restart=always
 RestartSec=2
-# useradd --system varco; install -d -o varco -m 700 /etc/varco
+# useradd --system --no-create-home --shell /usr/sbin/nologin varco
 User=varco
 # The server has no NIC and needs no privileges. To listen below port 1024, uncomment:
 # AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
-# The server key is created here on first start.
-ReadWritePaths=/etc/varco
+# Creates /var/lib/varco, which holds the database and the server key.
+StateDirectory=varco
+StateDirectoryMode=0700
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

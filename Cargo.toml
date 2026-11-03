@@ -1,6 +1,6 @@
 [package]
 name = "varco"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2021"
 publish = false
 license = "MIT"
@@ -13,7 +13,7 @@ gui = ["dep:slint", "dep:slint-build"]
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
 bytes = "1"
 dirs = "6"
@@ -42,6 +42,8 @@ tun-rs = { version = "2.8", features = ["async_tokio"] }
 smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-tcp-reno", "auto-icmp-echo-reply"] }
 # The winit hooks are unstable across Slint minor releases, hence the tilde.
 slint = { version = "~1.18", optional = true, default-features = false, features = ["std", "compat-1-18", "backend-winit", "renderer-winit-software", "unstable-winit-030"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+argon2 = "0.6.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -55,6 +57,12 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 [build-dependencies]
 slint-build = { version = "~1.18", optional = true }
 embed-manifest = "1"
+
+# Password hashing is far too slow without optimization to test or develop with.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

@@ -92,8 +92,8 @@
     <li>
       <span class="num">1</span>
       <h3>发一段 Code</h3>
-      <p>在服务器上生成，通过你信任的渠道发给对方。</p>
-      <code class="mono">varco server gen-credential</code>
+      <p>在管理后台生成，可以是一次性、限时或永久的，通过你信任的渠道发给对方。</p>
+      <code class="mono">工作区 → Code → 生成</code>
     </li>
     <li>
       <span class="num">2</span>
@@ -213,28 +213,27 @@ ssh -p 2222 -L 9229:127.0.0.1:9229 emil@10.77.1.3</pre>
 <section class="srv" id="server">
   <header class="sec-head">
     <span class="idx mono">05</span>
-    <h2>服务端只有一个进程，一个文件。</h2>
-    <p>没有数据库，没有管理后台，没有内核模块，也不需要 root。配置里只有地址、网段和凭证。</p>
+    <h2>服务端只有一个进程，不用写配置。</h2>
+    <p>没有内核模块，也不需要 root。装好后打开网页初始化，超管创建工作区，每个团队用自己的管理员管理自己的组网。</p>
   </header>
   <div class="srv-grid">
-<pre class="code mono" tabindex="0" aria-label="服务端配置示例"><span class="c"># config.toml</span>
-<span class="k">listen</span>      = <span class="s">"0.0.0.0:8443"</span>
-<span class="k">public_addr</span> = <span class="s">"vpn.example.com:8443"</span>
-
-<span class="c"># 每个客户一个 network，彼此不通</span>
-[[<span class="k">network</span>]]
-<span class="k">name</span>        = <span class="s">"customer-a"</span>
-<span class="k">cidr</span>        = <span class="s">"10.77.1.0/24"</span>
-<span class="k">credentials</span> = [<span class="s">"…"</span>]</pre>
-<pre class="code mono" tabindex="0" aria-label="服务端操作示例"><span class="c"># 生成一段发给对方的 Code</span>
-varco server gen-credential \
-  --network customer-a
-
-<span class="c"># 启动</span>
+<pre class="code mono" tabindex="0" aria-label="服务端安装示例"><span class="c"># 安装并启动，不用写配置</span>
 systemctl enable --now varco
 
-<span class="c"># 谁上线了，分到什么 IP</span>
-journalctl -u varco -f</pre>
+<span class="c"># 后台默认只监听本机</span>
+ssh -L 8444:127.0.0.1:8444 server
+
+<span class="c"># http://127.0.0.1:8444</span>
+<span class="k">账号</span> = <span class="s">"root"</span>
+<span class="k">密码</span> = <span class="s">"admin"</span>   <span class="c"># 首次登录必须修改</span></pre>
+<pre class="code mono" tabindex="0" aria-label="后台能力示例"><span class="c"># 超管</span>
+创建工作区，指定网段和 owner
+全局黑名单、审计、Prometheus 指标
+
+<span class="c"># owner 和管理员，只管自己的工作区</span>
+生成和撤销 Code，看在线成员和流量
+踢人，拉黑设备或 IP
+owner 还能增删管理员</pre>
   </div>
 </section>
 
@@ -254,7 +253,7 @@ journalctl -u varco -f</pre>
     <dt>程序没有正式代码签名</dt>
     <dd>首次运行可能被 SmartScreen 或 Gatekeeper 拦截。普通模式需要提权，因为创建虚拟网卡要管理员权限。</dd>
     <dt>只支持 IPv4</dt>
-    <dd>没有审批流、托盘常驻和开机自启。一次性和限时 Code 在管理后台生成和撤销，永久凭证从配置里删掉再重启服务。</dd>
+    <dd>没有审批流、托盘常驻和开机自启。</dd>
   </dl>
 </section>
 

@@ -11,9 +11,10 @@ use varco::credential::{encode_secret, Credential, Pin, Secret};
 use varco::proto::{
     read_frame, write_frame, Frame, Hello, RejectReason, MAX_SERVER_FRAME, VERSION,
 };
-use varco::server::config::NetworkConfig;
 use varco::server::hub::{Hub, MemberView};
-use varco::server::state::{parse_ip_target, unix_now, BanTarget, CodeKind, Store};
+use varco::server::store::{
+    parse_ip_target, unix_now, BanTarget, CodeLimits, Store, Workspace, WorkspaceId,
+};
 use varco::tls::{self, Identity};
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -66,12 +67,11 @@ impl DeviceFactory for FakeFactory {
     type Device = FakeDevice;
     fn create(&self, _net: &NetInfo) -> Result<FakeDevice, FailReason> {
         self.created.fetch_add(1, Ordering::SeqCst);
-        let (from_os, to_os) = self
-            .parts
-            .lock()
-            .unwrap()
-            .take()
-            .expect("one device per test peer");
+        // A later device, as after a range change, is not connected to the test.
+        let (from_os, to_os) = self.parts.lock().unwrap().take().unwrap_or_else(|| {
+            let (to_os, _) = mpsc::unbounded_channel();
+            (mpsc::unbounded_channel().1, to_os)
+        });
         Ok(FakeDevice {
             from_os: tokio::sync::Mutex::new(from_os),
             to_os,
@@ -154,26 +154,46 @@ fn packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
     p
 }
 
-fn networks() -> Vec<NetworkConfig> {
-    vec![
-        NetworkConfig {
-            name: "a".into(),
-            cidr: "10.1.0.0/24".parse().unwrap(),
-            secrets: vec![SECRET_A],
-        },
-        NetworkConfig {
-            name: "b".into(),
-            cidr: "10.2.0.0/24".parse().unwrap(),
-            secrets: vec![SECRET_B],
-        },
-    ]
+static NEXT_STORE: AtomicUsize = AtomicUsize::new(0);
+
+fn state_path(name: &str) -> std::path::PathBuf {
+    let serial = NEXT_STORE.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "varco-relay-{}-{serial}-{name}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("varco.db")
+}
+
+/// Two workspaces, A and B, each with one permanent Code.
+fn seeded_store(path: &std::path::Path) -> (Arc<Store>, Vec<Workspace>) {
+    let store = Arc::new(Store::open(path).unwrap());
+    let a = store
+        .create_workspace("a", "10.1.0.0/24".parse().unwrap(), unix_now())
+        .unwrap();
+    let b = store
+        .create_workspace("b", "10.2.0.0/24".parse().unwrap(), unix_now())
+        .unwrap();
+    for (workspace, secret) in [(&a, &SECRET_A), (&b, &SECRET_B)] {
+        store
+            .add_code(workspace.id, secret, CodeLimits::default(), "", unix_now())
+            .unwrap();
+    }
+    (store, vec![a, b])
+}
+
+fn hub_for(store: &Arc<Store>) -> Arc<Hub> {
+    Arc::new(Hub::new(&store.workspaces().unwrap()).with_store(store.clone()))
 }
 
 async fn start_server_on(
     listener: TcpListener,
     identity: &Identity,
 ) -> tokio::task::JoinHandle<()> {
-    let hub = Arc::new(Hub::new(networks()));
+    let (store, _) = seeded_store(&state_path("plain"));
+    let hub = hub_for(&store);
     let config = tls::server_config(identity).unwrap();
     tokio::spawn(async move {
         let _ = varco::server::serve(listener, hub, config).await;
@@ -330,14 +350,10 @@ async fn unreachable_server_is_reported_on_first_attempt() {
 
 /// A runtime of its own: dropping it ends every task, connections included,
 /// which is what a process restart does and aborting one task does not.
-fn start_isolated_server(addr: SocketAddr, identity: &Identity) -> tokio::runtime::Runtime {
-    start_isolated_server_with(addr, identity, None)
-}
-
-fn start_isolated_server_with(
+fn start_isolated_server(
     addr: SocketAddr,
     identity: &Identity,
-    store: Option<Arc<Store>>,
+    store: Arc<Store>,
 ) -> tokio::runtime::Runtime {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -345,11 +361,7 @@ fn start_isolated_server_with(
         .build()
         .unwrap();
     let config = tls::server_config(identity).unwrap();
-    let hub = match store {
-        Some(store) => Hub::new(networks()).with_store(store),
-        None => Hub::new(networks()),
-    };
-    let hub = Arc::new(hub);
+    let hub = hub_for(&store);
     // Bound before returning, so a client started next cannot be refused. Retries
     // because a runtime shut down just now may still be closing its listener.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -376,7 +388,10 @@ async fn reconnects_after_server_restart_with_same_ip_and_same_device() {
     let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = probe.local_addr().unwrap();
     drop(probe);
-    let server = start_isolated_server(addr, &identity);
+    let path = state_path("restart-plain");
+    let (store, _) = seeded_store(&path);
+    let server = start_isolated_server(addr, &identity, store.clone());
+    drop(store);
 
     let mut first = spawn_peer(addr, identity.pin, SECRET_A, "first");
     let _ = first.connected().await;
@@ -399,7 +414,8 @@ async fn reconnects_after_server_restart_with_same_ip_and_same_device() {
         "network info must stay visible"
     );
 
-    let restarted = start_isolated_server(addr, &identity);
+    let reopened = Arc::new(Store::open(&path).unwrap());
+    let restarted = start_isolated_server(addr, &identity, reopened);
     second
         .wait_for("connected again", |s| s.phase == Phase::Connected)
         .await;
@@ -475,26 +491,20 @@ async fn departing_member_disappears_from_the_list() {
 
 // ---- Limited Codes, kicks and bans ----
 
-fn test_store(name: &str) -> (std::path::PathBuf, Arc<Store>) {
-    let dir = std::env::temp_dir().join(format!("varco-relay-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("state.json");
-    let store = Store::load(path.clone(), unix_now()).unwrap();
-    (path, Arc::new(store))
-}
-
 struct Managed {
     addr: SocketAddr,
     identity: Identity,
     hub: Arc<Hub>,
     store: Arc<Store>,
     state_path: std::path::PathBuf,
+    a: WorkspaceId,
+    b: WorkspaceId,
 }
 
 async fn start_managed(name: &str) -> Managed {
-    let (state_path, store) = test_store(name);
-    let hub = Arc::new(Hub::new(networks()).with_store(store.clone()));
+    let state_path = state_path(name);
+    let (store, workspaces) = seeded_store(&state_path);
+    let hub = hub_for(&store);
     let identity = tls::generate_identity().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -509,37 +519,46 @@ async fn start_managed(name: &str) -> Managed {
         hub,
         store,
         state_path,
+        a: workspaces[0].id,
+        b: workspaces[1].id,
     }
 }
 
 impl Managed {
-    fn once(&self) -> (String, Secret) {
+    fn code(&self, limits: CodeLimits) -> (String, Secret) {
         let (record, secret) = self
             .store
-            .create_code("a", CodeKind::Once, "", unix_now())
+            .create_code(self.a, limits, "", unix_now())
             .unwrap();
         (record.id, secret)
     }
+    fn once(&self) -> (String, Secret) {
+        self.code(CodeLimits {
+            max_uses: Some(1),
+            expires_at: None,
+        })
+    }
     fn timed(&self, seconds: u64) -> (String, Secret) {
-        let kind = CodeKind::Timed {
-            expires_at: unix_now() + seconds,
-        };
-        let (record, secret) = self.store.create_code("a", kind, "", unix_now()).unwrap();
-        (record.id, secret)
+        self.code(CodeLimits {
+            max_uses: None,
+            expires_at: Some(unix_now() + seconds),
+        })
     }
     fn peer(&self, secret: Secret, name: &str) -> Peer {
         spawn_peer(self.addr, self.identity.pin, secret, name)
     }
-    fn member(&self, hostname: &str) -> MemberView {
+    fn member_in(&self, workspace: WorkspaceId, hostname: &str) -> MemberView {
         self.hub
-            .members()
+            .members(workspace)
             .into_iter()
             .find(|member| member.hostname == hostname)
             .expect("member is online")
     }
+    fn member(&self, hostname: &str) -> MemberView {
+        self.member_in(self.a, hostname)
+    }
     fn used(&self, id: &str) -> usize {
-        let codes = self.store.codes();
-        let code = codes.iter().find(|code| code.id == id).unwrap();
+        let code = self.store.code(self.a, id, unix_now()).unwrap().unwrap();
         code.used_by.len()
     }
     async fn raw(&self, secret: Secret, client_id: &str, device: Option<&str>) -> RawClient {
@@ -738,30 +757,36 @@ async fn leaving_before_the_first_frame_leaves_the_code_unused() {
     assert_eq!(server.used(&id), 0);
 }
 
+async fn wait_for_uses(store: &Store, workspace: WorkspaceId, id: &str, count: usize) {
+    for _ in 0..200 {
+        let code = store.code(workspace, id, unix_now()).unwrap().unwrap();
+        if code.used_by.len() == count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("Code {id} did not reach {count} uses");
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_used_code_survives_a_server_restart_for_its_device_only() {
+async fn a_used_code_survives_a_server_restart_for_its_run_only() {
     let identity = tls::generate_identity().unwrap();
     let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = probe.local_addr().unwrap();
     drop(probe);
-    let (path, store) = test_store("restart");
+    let path = state_path("restart");
+    let (store, workspaces) = seeded_store(&path);
+    let limits = CodeLimits {
+        max_uses: Some(1),
+        expires_at: None,
+    };
     let (record, secret) = store
-        .create_code("a", CodeKind::Once, "", unix_now())
+        .create_code(workspaces[0].id, limits, "", unix_now())
         .unwrap();
-    let server = start_isolated_server_with(addr, &identity, Some(store));
+    let server = start_isolated_server(addr, &identity, store.clone());
     let mut peer = spawn_peer(addr, identity.pin, secret, "first");
     let net = peer.connected().await;
-    for _ in 0..200 {
-        let codes = Store::load(path.clone(), unix_now()).unwrap().codes();
-        if !codes[0].used_by.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert_eq!(
-        record.id,
-        Store::load(path.clone(), unix_now()).unwrap().codes()[0].id
-    );
+    wait_for_uses(&store, workspaces[0].id, &record.id, 1).await;
 
     server.shutdown_background();
     peer.wait_for("reconnecting", |s| {
@@ -769,8 +794,8 @@ async fn a_used_code_survives_a_server_restart_for_its_device_only() {
     })
     .await;
 
-    let reloaded = Arc::new(Store::load(path, unix_now()).unwrap());
-    let restarted = start_isolated_server_with(addr, &identity, Some(reloaded));
+    let reopened = Arc::new(Store::open(&path).unwrap());
+    let restarted = start_isolated_server(addr, &identity, reopened);
     peer.wait_for("connected again", |s| s.phase == Phase::Connected)
         .await;
     assert_eq!(peer.status.borrow().net.as_ref().unwrap().ip, net.ip);
@@ -787,23 +812,21 @@ async fn a_timed_code_stops_admitting_but_never_drops_a_running_client() {
     let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = probe.local_addr().unwrap();
     drop(probe);
-    let (path, store) = test_store("timed");
-    let kind = CodeKind::Timed {
-        expires_at: unix_now() + 3,
+    let path = state_path("timed");
+    let (store, workspaces) = seeded_store(&path);
+    let limits = CodeLimits {
+        max_uses: None,
+        expires_at: Some(unix_now() + 3),
     };
-    let (_, secret) = store.create_code("a", kind, "", unix_now()).unwrap();
-    let server = start_isolated_server_with(addr, &identity, Some(store.clone()));
+    let (record, secret) = store
+        .create_code(workspaces[0].id, limits, "", unix_now())
+        .unwrap();
+    let server = start_isolated_server(addr, &identity, store.clone());
     let mut first = spawn_peer(addr, identity.pin, secret, "first");
     let mut second = spawn_peer(addr, identity.pin, secret, "second");
     first.connected().await;
     second.connected().await;
-    for _ in 0..200 {
-        if store.codes()[0].used_by.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert_eq!(store.codes()[0].used_by.len(), 2, "both devices may use it");
+    wait_for_uses(&store, workspaces[0].id, &record.id, 2).await;
 
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert_eq!(first.status.borrow().phase, Phase::Connected);
@@ -815,8 +838,8 @@ async fn a_timed_code_stops_admitting_but_never_drops_a_running_client() {
             matches!(s.phase, Phase::Reconnecting { .. })
         })
         .await;
-    let reloaded = Arc::new(Store::load(path, unix_now()).unwrap());
-    let restarted = start_isolated_server_with(addr, &identity, Some(reloaded));
+    let reopened = Arc::new(Store::open(&path).unwrap());
+    let restarted = start_isolated_server(addr, &identity, reopened);
     first
         .wait_for("connected again", |s| s.phase == Phase::Connected)
         .await;
@@ -832,7 +855,10 @@ async fn kicking_stops_this_run_and_a_new_run_can_come_back() {
     let mut peer = server.peer(secret, "kicked");
     peer.connected().await;
     let member = server.member("kicked");
-    server.hub.kick_member(&member.id, unix_now()).unwrap();
+    server
+        .hub
+        .kick_member(server.a, &member.id, unix_now())
+        .unwrap();
     assert_eq!(peer.failure().await, FailReason::Removed);
     // Started again, it is a new run with a new client_id.
     let mut again = server.peer(secret, "again");
@@ -845,7 +871,7 @@ async fn kicking_applies_to_a_permanent_credential_too() {
     let mut peer = server.peer(SECRET_A, "kicked");
     peer.connected().await;
     let id = server.member("kicked").id;
-    server.hub.kick_member(&id, unix_now()).unwrap();
+    server.hub.kick_member(server.a, &id, unix_now()).unwrap();
     assert_eq!(peer.failure().await, FailReason::Removed);
     let mut again = server.peer(SECRET_A, "again");
     again.connected().await;
@@ -866,7 +892,13 @@ async fn a_banned_device_stays_out_whatever_code_it_brings_until_lifted() {
 
     let ban = server
         .hub
-        .add_ban(BanTarget::Device(device.clone()), "", unix_now())
+        .add_ban(
+            Some(server.a),
+            BanTarget::Device(device.clone()),
+            "",
+            None,
+            unix_now(),
+        )
         .unwrap();
     let closed = tokio::time::timeout(WAIT, async {
         while read_frame(&mut client.stream, MAX_SERVER_FRAME)
@@ -882,7 +914,7 @@ async fn a_banned_device_stays_out_whatever_code_it_brings_until_lifted() {
         let attempt = server.raw(code, "new-run", Some(&device)).await;
         assert_eq!(attempt.rejected(), Some(RejectReason::Removed));
     }
-    server.store.remove_ban(&ban.id).unwrap();
+    server.store.remove_ban(Some(server.a), &ban.id).unwrap();
     assert!(server
         .raw(other_code, "new-run", Some(&device))
         .await
@@ -909,7 +941,10 @@ async fn a_banned_address_is_dropped_before_tls_until_lifted() {
         Some("127.0.0.1".parse().unwrap())
     );
     let target = BanTarget::Ip(parse_ip_target("127.0.0.1").unwrap());
-    let ban = server.hub.add_ban(target, "", unix_now()).unwrap();
+    let ban = server
+        .hub
+        .add_ban(None, target, "", None, unix_now())
+        .unwrap();
     peer.wait_for("disconnected", |s| {
         matches!(s.phase, Phase::Reconnecting { .. })
     })
@@ -917,7 +952,7 @@ async fn a_banned_address_is_dropped_before_tls_until_lifted() {
     let attempt = raw_connect(server.addr, server.identity.pin, SECRET_A, "x", None).await;
     assert!(attempt.is_err(), "a banned address got through TLS");
 
-    server.store.remove_ban(&ban.id).unwrap();
+    server.store.remove_ban(None, &ban.id).unwrap();
     peer.wait_for("back", |s| s.phase == Phase::Connected).await;
 }
 
@@ -933,25 +968,16 @@ async fn revoking_a_code_removes_those_who_came_with_it_and_nobody_else() {
         server.member("with-code").code.as_deref(),
         Some(id.as_str())
     );
-    assert_eq!(server.member("permanent").code, None);
+    assert_ne!(
+        server.member("permanent").code.as_deref(),
+        Some(id.as_str())
+    );
 
-    server.hub.revoke_code(&id, unix_now()).unwrap();
+    server.hub.revoke_code(server.a, &id, unix_now()).unwrap();
     assert_eq!(with_code.failure().await, FailReason::CredentialRejected);
     let mut late = server.peer(secret, "late");
     assert_eq!(late.failure().await, FailReason::CredentialRejected);
     assert_eq!(permanent.status.borrow().phase, Phase::Connected);
-}
-
-#[tokio::test]
-async fn a_code_for_a_network_no_longer_configured_is_refused() {
-    let server = start_managed("gone-network").await;
-    let (record, secret) = server
-        .store
-        .create_code("removed", CodeKind::Once, "", unix_now())
-        .unwrap();
-    let attempt = server.raw(secret, "x", None).await;
-    assert_eq!(attempt.rejected(), Some(RejectReason::InvalidCredential));
-    assert!(server.store.codes().iter().any(|c| c.id == record.id));
 }
 
 #[tokio::test]
@@ -961,6 +987,184 @@ async fn state_is_on_disk_as_soon_as_a_code_is_used() {
     let mut peer = server.peer(secret, "first");
     peer.connected().await;
     server.wait_used(&id, 1).await;
-    let reloaded = Store::load(server.state_path.clone(), unix_now()).unwrap();
-    assert_eq!(reloaded.codes()[0].used_by[0].hostname, "first");
+    let reopened = Store::open(&server.state_path).unwrap();
+    let code = reopened.code(server.a, &id, unix_now()).unwrap().unwrap();
+    assert_eq!(code.used_by[0].hostname, "first");
+}
+
+#[tokio::test]
+async fn two_workspaces_with_the_same_range_never_meet() {
+    let server = start_managed("same-range").await;
+    let cidr = "10.1.0.0/24".parse().unwrap();
+    let twin = server
+        .store
+        .create_workspace("twin", cidr, unix_now())
+        .unwrap();
+    server.hub.add_network(&twin);
+    let (_, twin_secret) = server
+        .store
+        .create_code(twin.id, CodeLimits::default(), "", unix_now())
+        .unwrap();
+    let mut a1 = server.peer(SECRET_A, "a1");
+    let mut a2 = server.peer(SECRET_A, "a2");
+    let mut t1 = server.peer(twin_secret, "t1");
+    let mut t2 = server.peer(twin_secret, "t2");
+    let (net_a1, net_a2) = (a1.connected().await, a2.connected().await);
+    let (net_t1, net_t2) = (t1.connected().await, t2.connected().await);
+    assert_eq!(net_t1.network, "twin");
+    assert_eq!(
+        (net_a1.ip, net_a2.ip),
+        (net_t1.ip, net_t2.ip),
+        "the same addresses are in use in both"
+    );
+    a1.wait_for("own members", |s| s.members.len() == 2).await;
+    t1.wait_for("own members", |s| s.members.len() == 2).await;
+
+    let hello = packet(net_a1.ip, net_a2.ip, b"for a2 only");
+    a1.inject.send(hello.clone()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, a2.delivered.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        hello
+    );
+    assert_nothing_delivered(&mut t2).await;
+    let names: Vec<String> = a1
+        .status
+        .borrow()
+        .members
+        .iter()
+        .map(|member| member.hostname.clone())
+        .collect();
+    assert!(!names.iter().any(|name| name.starts_with('t')), "{names:?}");
+}
+
+#[tokio::test]
+async fn a_ban_or_kick_in_one_workspace_does_not_reach_another() {
+    let server = start_managed("ban-scope").await;
+    let device = "b".repeat(64);
+    let address = BanTarget::Ip(parse_ip_target("127.0.0.1").unwrap());
+    server
+        .hub
+        .add_ban(Some(server.a), address.clone(), "", None, unix_now())
+        .unwrap();
+    server
+        .hub
+        .add_ban(
+            Some(server.a),
+            BanTarget::Device(device.clone()),
+            "",
+            None,
+            unix_now(),
+        )
+        .unwrap();
+    let in_a = server.raw(SECRET_A, "x", Some(&device)).await;
+    assert_eq!(in_a.rejected(), Some(RejectReason::Removed));
+    let in_b = server.raw(SECRET_B, "x", Some(&device)).await;
+    assert!(in_b.welcomed(), "B has not banned anyone");
+    assert_eq!(
+        server.member_in(server.b, "x").device.as_deref(),
+        Some(device.as_str())
+    );
+
+    server
+        .hub
+        .kick_member(server.b, &server.member_in(server.b, "x").id, unix_now())
+        .unwrap();
+    let again = server.raw(SECRET_B, "x", None).await;
+    assert_eq!(again.rejected(), Some(RejectReason::Removed));
+}
+
+#[tokio::test]
+async fn a_bad_code_learns_nothing_about_bans() {
+    let server = start_managed("bad-code").await;
+    let device = "c".repeat(64);
+    server
+        .hub
+        .add_ban(
+            None,
+            BanTarget::Device(device.clone()),
+            "",
+            None,
+            unix_now(),
+        )
+        .unwrap();
+    let attempt = server.raw([0x77; 32], "x", Some(&device)).await;
+    assert_eq!(attempt.rejected(), Some(RejectReason::InvalidCredential));
+    let valid = server.raw(SECRET_B, "x", Some(&device)).await;
+    assert_eq!(
+        valid.rejected(),
+        Some(RejectReason::Removed),
+        "global reaches B"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_workspace_stops_its_clients_and_nobody_else() {
+    let server = start_managed("delete").await;
+    let mut in_a = server.peer(SECRET_A, "a");
+    let mut in_b = server.peer(SECRET_B, "b");
+    in_a.connected().await;
+    in_b.connected().await;
+    server.store.delete_workspace(server.a).unwrap();
+    server.hub.remove_network(server.a);
+    assert_eq!(in_a.failure().await, FailReason::CredentialRejected);
+    assert_eq!(in_b.status.borrow().phase, Phase::Connected);
+}
+
+#[tokio::test]
+async fn a_new_range_reaches_running_clients() {
+    let server = start_managed("new-range").await;
+    let mut peer = server.peer(SECRET_A, "p");
+    let net = peer.connected().await;
+    assert_eq!(net.ip, Ipv4Addr::new(10, 1, 0, 1));
+    let updated = server
+        .store
+        .update_workspace(server.a, None, Some("10.9.0.0/24".parse().unwrap()))
+        .unwrap();
+    server.hub.replace_network(&updated);
+    peer.wait_for("new address", |s| {
+        s.phase == Phase::Connected
+            && s.net
+                .as_ref()
+                .is_some_and(|net| net.ip == Ipv4Addr::new(10, 9, 0, 1))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn connections_and_traffic_are_recorded() {
+    let server = start_managed("history").await;
+    let mut a = server.peer(SECRET_A, "sender");
+    let mut b = server.peer(SECRET_A, "receiver");
+    let (net_a, net_b) = (a.connected().await, b.connected().await);
+    let data = packet(net_a.ip, net_b.ip, &[0; 500]);
+    a.inject.send(data.clone()).unwrap();
+    tokio::time::timeout(WAIT, b.delivered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(server.member("sender").rx_bytes, data.len() as u64);
+    assert_eq!(server.member("receiver").tx_bytes, data.len() as u64);
+    let stats = server.hub.stats();
+    let stat = stats.iter().find(|s| s.workspace_id == server.a).unwrap();
+    assert_eq!((stat.online, stat.rx_bytes), (2, data.len() as u64));
+
+    a.stop.send(true).unwrap();
+    let page = varco::server::store::PageRequest {
+        query: "sender",
+        limit: 10,
+        offset: 0,
+    };
+    for _ in 0..200 {
+        let records = server.store.connections(server.a, page).unwrap();
+        if records.items.first().is_some_and(|r| r.ended_at.is_some()) {
+            assert_eq!(records.items[0].rx_bytes, data.len() as u64);
+            assert_eq!(records.items[0].peer, "127.0.0.1");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the connection's end was not recorded");
 }
