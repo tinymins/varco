@@ -36,6 +36,7 @@ macos() {
     cp "target/$target/release/varco" "$app/Contents/MacOS/varco"
     sed "s/@VERSION@/${VERSION%%-*}/" deploy/Info.plist > "$app/Contents/Info.plist"
     notices "$app/Contents/Resources"
+    cp assets/icon/varco.icns "$app/Contents/Resources/varco.icns"
     # Ad-hoc signature: Apple Silicon refuses to run unsigned code at all.
     codesign --force --deep --sign - "$app"
     (cd "dist/varco-$VERSION-macos-$arch" && zip -qry "../varco-$VERSION-macos-$arch.zip" varco.app)

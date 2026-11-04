@@ -52,6 +52,7 @@ jobs:
           cp target/${{ matrix.target }}/release/varco "$APP/Contents/MacOS/varco"
           sed "s/@VERSION@/${VERSION%%-*}/" deploy/Info.plist > "$APP/Contents/Info.plist"
           cp assets/fonts/OFL-LICENSE.txt "$APP/Contents/Resources/NotoSansSC-OFL.txt"
+          cp assets/icon/varco.icns "$APP/Contents/Resources/varco.icns"
           codesign --force --deep --sign - "$APP"
           ditto -c -k --keepParent "$APP" varco-macos-${{ matrix.arch }}.zip
       - uses: actions/upload-artifact@v4
