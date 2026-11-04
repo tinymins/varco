@@ -15,9 +15,9 @@ component Row {
 
 export component App inherits Window {
     title: "varco";
-    preferred-width: 400px;
+    preferred-width: 440px;
     min-width: 340px;
-    preferred-height: 560px;
+    preferred-height: 640px;
     min-height: 300px;
     default-font-family: "Noto Sans SC";
     default-font-size: 14px;
@@ -288,13 +288,14 @@ export component App inherits Window {
                     text: "SSH 由启动配置自动开启，可登录的公钥 " + root.ssh-configured-key;
                     color: #b54708;
                     font-size: 12px;
-                    wrap: word-wrap;
+                    // A fingerprint is one long word: word-wrap would widen the scroll area to fit it.
+                    wrap: char-wrap;
                 }
                 if root.ssh-on && root.ssh-fingerprint != "": Text {
                     text: "主机指纹 " + root.ssh-fingerprint;
                     color: #666;
                     font-size: 11px;
-                    wrap: word-wrap;
+                    wrap: char-wrap;
                 }
                 if root.ssh-on && root.ssh-admin: Text {
                     text: "远程 shell 具有管理员权限。不用时请关闭。";
