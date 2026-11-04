@@ -16,15 +16,39 @@ use tokio_util::io::ReaderStream;
 const SITE: &str = "https://lab.vmins.com/varco/";
 
 /// The only names ever served, so a request can never name a path of its own.
-const CLIENTS: [(&str, &str, &str); 8] = [
-    ("varco-windows-x64.exe", "Windows", "x64"),
-    ("varco-windows-arm64.exe", "Windows", "ARM64"),
-    ("varco-macos-arm64.zip", "macOS", "Apple 芯片"),
-    ("varco-macos-x64.zip", "macOS", "Intel"),
-    ("varco-linux-gui-x64", "Linux 桌面", "x64"),
-    ("varco-linux-gui-arm64", "Linux 桌面", "ARM64"),
-    ("varco-linux-x64", "Linux 无界面", "x64"),
-    ("varco-linux-arm64", "Linux 无界面", "ARM64"),
+const CLIENTS: [(&str, &str, &str, &str, &str); 8] = [
+    ("varco-windows-x64.exe", "windows", "Windows", "x64", "x64"),
+    (
+        "varco-windows-arm64.exe",
+        "windows",
+        "Windows",
+        "arm64",
+        "ARM64",
+    ),
+    (
+        "varco-macos-arm64.zip",
+        "macos",
+        "macOS",
+        "arm64",
+        "Apple 芯片",
+    ),
+    ("varco-macos-x64.zip", "macos", "macOS", "x64", "Intel"),
+    ("varco-linux-gui-x64", "linux", "Linux 桌面", "x64", "x64"),
+    (
+        "varco-linux-gui-arm64",
+        "linux",
+        "Linux 桌面",
+        "arm64",
+        "ARM64",
+    ),
+    ("varco-linux-x64", "linux-cli", "Linux 无界面", "x64", "x64"),
+    (
+        "varco-linux-arm64",
+        "linux-cli",
+        "Linux 无界面",
+        "arm64",
+        "ARM64",
+    ),
 ];
 
 /// Beside the program when run from the unpacked package, and under `share` once
@@ -57,7 +81,9 @@ async fn find(dirs: &[PathBuf], file: &str) -> Option<(PathBuf, u64)> {
 #[derive(Serialize)]
 pub struct Client {
     file: &'static str,
+    os: &'static str,
     platform: &'static str,
+    cpu: &'static str,
     arch: &'static str,
     size: u64,
 }
@@ -71,11 +97,13 @@ pub struct Catalog {
 
 pub async fn catalog(State(console): State<Arc<Console>>) -> Json<Catalog> {
     let mut clients = Vec::new();
-    for (file, platform, arch) in CLIENTS {
+    for (file, os, platform, cpu, arch) in CLIENTS {
         if let Some((_, size)) = find(&console.client_dirs, file).await {
             clients.push(Client {
                 file,
+                os,
                 platform,
+                cpu,
                 arch,
                 size,
             });
@@ -94,9 +122,9 @@ pub async fn download(
     Path(file): Path<String>,
 ) -> ApiResult<Response> {
     let not_found = || ApiError::new(StatusCode::NOT_FOUND, "没有这个文件");
-    let (name, _, _) = CLIENTS
+    let (name, ..) = CLIENTS
         .iter()
-        .find(|(name, _, _)| *name == file)
+        .find(|(name, ..)| *name == file)
         .ok_or_else(not_found)?;
     let (path, size) = find(&console.client_dirs, name)
         .await

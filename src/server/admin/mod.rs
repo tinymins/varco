@@ -508,6 +508,13 @@ async fn components() -> impl IntoResponse {
     )
 }
 
+async fn downloads_script() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("ui/downloads.js"),
+    )
+}
+
 async fn stylesheet() -> impl IntoResponse {
     (
         [(CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -526,6 +533,11 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/style.css", get(stylesheet))
         .route("/healthz", get(s::healthz))
         .route("/metrics", get(s::metrics))
+        .route(
+            "/downloads",
+            get(|| async { Html(include_str!("ui/downloads.html")) }),
+        )
+        .route("/downloads.js", get(downloads_script))
         .route("/api/downloads", get(downloads::catalog))
         .route("/downloads/{file}", get(downloads::download))
         .route("/api/login", post(a::login))

@@ -23,13 +23,6 @@ async function api(method, path, body) {
 const time = (seconds) => seconds ? new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false }) : "—";
 const short = (text) => text ? text.slice(0, 8) : "—";
 
-function bytes(count) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = count ?? 0, unit = 0;
-  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
-  return (unit === 0 ? value : value.toFixed(1)) + " " + units[unit];
-}
-
 // Make a change, say so, redraw. Buttons and forms show a failure in a toast.
 function changes(action, done) {
   return async () => {
@@ -104,21 +97,9 @@ function showLogin() {
     field("用户名", user),
     field("密码", pass),
     formActions(submitButton("登录")));
-  const downloads = el("div", { id: "login-downloads", hidden: true });
-  const items = [["login", "登录"], ["downloads", "下载客户端"]];
-  // Both stay in the page, so looking at the downloads keeps what was typed.
-  const select = (key) => {
-    const next = tabs(items, key, select);
-    bar.replaceWith(next);
-    bar = next;
-    form.hidden = key !== "login";
-    downloads.hidden = key !== "downloads";
-    if (key === "downloads") {
-      viewDownloadList().then((list) => downloads.replaceChildren(list)).catch((error) => toast(error.message, "error"));
-    }
-  };
-  let bar = tabs(items, "login", select);
-  show(authPage("varco 管理后台", null, bar, form, downloads));
+  const page = authPage("varco 管理后台", null, form);
+  page.append(el("a", { class: "auth-link", href: "downloads" }, "下载客户端"));
+  show(page);
 }
 
 async function viewDownloadList() {

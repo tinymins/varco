@@ -182,6 +182,8 @@ const ROUTES: &[(&str, &str, Needs)] = &[
     ("POST", "/api/tokens", Needs::Super),
     ("DELETE", "/api/tokens/{id}", Needs::Super),
     ("GET", "/api/tokens/{id}/secret", Needs::Super),
+    ("GET", "/downloads", Needs::Nothing),
+    ("GET", "/downloads.js", Needs::Nothing),
     ("GET", "/api/downloads", Needs::Nothing),
     ("GET", "/downloads/{file}", Needs::Nothing),
     ("GET", "/api/w/{ws}", Needs::Member),
@@ -748,7 +750,14 @@ async fn cookie_flags_follow_the_proxy() {
 #[tokio::test]
 async fn pages_have_protective_headers_and_no_inline_allowance() {
     let h = harness("page");
-    for path in ["/", "/app.js", "/components.js", "/style.css"] {
+    for path in [
+        "/",
+        "/app.js",
+        "/components.js",
+        "/style.css",
+        "/downloads",
+        "/downloads.js",
+    ] {
         let (status, headers, _) = h.send(Method::GET, path, &Credential_::None, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[X_FRAME_OPTIONS], "DENY");
@@ -756,8 +765,14 @@ async fn pages_have_protective_headers_and_no_inline_allowance() {
         let policy = headers[CONTENT_SECURITY_POLICY].to_str().unwrap();
         assert!(!policy.contains("unsafe-inline"));
     }
-    let page = include_str!("ui/index.html");
-    assert!(!page.contains("<script>") && !page.contains("<style>") && !page.contains(" style="));
+    for page in [
+        include_str!("ui/index.html"),
+        include_str!("ui/downloads.html"),
+    ] {
+        assert!(
+            !page.contains("<script>") && !page.contains("<style>") && !page.contains(" style=")
+        );
+    }
 }
 
 // ---- Workspaces and administrators ----
@@ -1389,6 +1404,8 @@ async fn anyone_can_list_and_download_the_clients_in_the_package() {
     assert_eq!(catalog["clients"].as_array().unwrap().len(), 1, "{catalog}");
     assert_eq!(catalog["clients"][0]["file"], "varco-linux-x64");
     assert_eq!(catalog["clients"][0]["size"], 12);
+    assert_eq!(catalog["clients"][0]["os"], "linux-cli");
+    assert_eq!(catalog["clients"][0]["cpu"], "x64");
 
     let (status, headers, body) = h
         .send(
