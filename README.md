@@ -24,6 +24,9 @@
 | macOS | `varco-macos-arm64.zip`、`varco-macos-x64.zip` | 窗口客户端 |
 | Linux 桌面 | `varco-linux-gui-x64`、`varco-linux-gui-arm64` | 窗口客户端，需要 glibc 2.36 以上和 fontconfig |
 | Linux 服务器 | `varco-linux-x64`、`varco-linux-arm64` | 服务端和无界面客户端，静态链接 |
+| 服务端包 | `varco-server-linux-x64.tar.gz`、`varco-server-linux-arm64.tar.gz` | 服务端加上面所有客户端，用户可以直接从后台下载客户端 |
+
+已经有服务端的话，也可以在后台的“下载客户端”页下载，登录页和管理页都有这个入口，不用登录。
 
 ## 客户端
 
@@ -142,12 +145,17 @@ macOS 的 `varco.app` 请把配置放在 `varco.app/Contents/MacOS/varco.toml`�
 记得在防火墙或云安全组放行中继的 TCP 端口（默认 8443）。
 
 ```sh
+tar xzf varco-server-linux-x64.tar.gz && cd varco-server-linux-x64
 useradd --system --no-create-home --shell /usr/sbin/nologin varco
-install -m 755 varco-linux-x64 /usr/local/bin/varco
-install -m 644 deploy/varco.service /etc/systemd/system/
+install -m 755 varco /usr/local/bin/varco
+install -d /usr/local/share/varco/clients
+install -m 755 clients/* /usr/local/share/varco/clients/
+install -m 644 varco.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now varco
 ```
+
+后台提供的客户端来自 `/usr/local/share/varco/clients`，也会查找程序旁边的 `clients` 目录。不需要这项功能时，可以只安装 `varco-linux-x64` 这一个文件，后台仍会显示官网链接。升级服务端时请一起替换这个目录，否则后台提供的还是旧版客户端。
 
 不用写任何配置。启动参数只有两个，因为它们必须在数据库打开之前知道：
 
@@ -243,6 +251,7 @@ journalctl -u varco -f
 
 - **备份数据目录**：`varco.db` 存工作区、账号、Code、Token 和黑名单，其中 Code 和 Token 可以直接使用，备份要同样妥善保管；`varco-server.key` 决定所有 Code 里的证书指纹，丢失后所有 Code 都要重发。文件损坏时服务端拒绝启动，不会当作空数据继续运行。
 - **修改对外地址**：只影响之后生成或复制的 Code，已发出的 Code 仍指向旧地址。
+- **IP 版 Code**：对外地址是域名时，复制 Code 的窗口可以切换到 IP，给 DNS 有故障的电脑用。IP 默认由服务端解析域名得到；如果服务器解析到的是内网地址，请在服务设置里填写对外 IP。服务器换 IP 后，发出的 IP 版 Code 会连不上。
 - **修改中继监听地址**：已连接的成员不受影响。新地址绑定失败时保留旧地址。
 - **历史保留**：连接历史和审计默认保留 30 天，可在服务设置里修改。审计的来源地址来自代理上报，仅供参考。
 
