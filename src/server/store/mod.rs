@@ -41,6 +41,7 @@ pub const MIN_PREFIX: u8 = 20;
 pub const MAX_PREFIX: u8 = 30;
 
 pub const SETTING_PUBLIC_ADDR: &str = "public_addr";
+pub const SETTING_PUBLIC_IP: &str = "public_ip";
 pub const SETTING_RELAY_LISTEN: &str = "relay_listen";
 pub const SETTING_HISTORY_DAYS: &str = "history_days";
 

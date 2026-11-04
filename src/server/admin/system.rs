@@ -5,7 +5,7 @@ use crate::server::hub::NetworkStats;
 use crate::server::store::{
     is_host_port, parse_cidr, unix_now, AuditEntry, Ban, ChangeError, Page, Role, TokenInfo,
     UserId, UserOverview, Workspace, WorkspaceId, SETTING_HISTORY_DAYS, SETTING_PUBLIC_ADDR,
-    SETTING_RELAY_LISTEN,
+    SETTING_PUBLIC_IP, SETTING_RELAY_LISTEN,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_TYPE, HOST};
@@ -34,6 +34,8 @@ pub async fn healthz(State(console): State<Arc<Console>>) -> Json<Health> {
 #[derive(Serialize)]
 pub struct Settings {
     public_addr: Option<String>,
+    /// Empty means the address is looked up each time a Code is copied.
+    public_ip: Option<String>,
     relay_listen: Option<String>,
     relay_listening_on: Option<String>,
     history_days: u64,
@@ -64,6 +66,7 @@ pub async fn settings(
     let store = console.store();
     Ok(Json(Settings {
         public_addr: store.setting(SETTING_PUBLIC_ADDR)?,
+        public_ip: store.setting(SETTING_PUBLIC_IP)?,
         relay_listen: store.setting(SETTING_RELAY_LISTEN)?,
         relay_listening_on: console.relay.listening_on().await,
         history_days: store.history_days()?,
@@ -75,6 +78,7 @@ pub async fn settings(
 #[derive(Deserialize)]
 pub struct SettingsChange {
     public_addr: Option<String>,
+    public_ip: Option<String>,
     relay_listen: Option<String>,
     history_days: Option<u64>,
 }
@@ -91,6 +95,12 @@ pub async fn update_settings(
             "对外地址要写成 host:port 或 ip:port，例如 vpn.example.com:8443",
         ));
     }
+    let public_ip = body.public_ip.as_deref().map(str::trim);
+    if public_ip.is_some_and(|ip| !ip.is_empty() && ip.parse::<std::net::IpAddr>().is_err()) {
+        return Err(ApiError::bad_request(
+            "对外 IP 只写 IP，不带端口，例如 203.0.113.7；留空表示自动解析",
+        ));
+    }
     if body.history_days == Some(0) {
         return Err(ApiError::bad_request("历史保留天数至少为 1"));
     }
@@ -105,6 +115,9 @@ pub async fn update_settings(
     }
     if let Some(addr) = public_addr {
         store.set_setting(SETTING_PUBLIC_ADDR, addr)?;
+    }
+    if let Some(ip) = public_ip {
+        store.set_setting(SETTING_PUBLIC_IP, ip)?;
     }
     if let Some(days) = body.history_days {
         store.set_setting(SETTING_HISTORY_DAYS, &days.to_string())?;

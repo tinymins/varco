@@ -107,10 +107,42 @@ jobs:
           path: varco-linux-gui-${{ matrix.arch }}
           if-no-files-found: error
 
+  server-package:
+    name: Server package ${{ matrix.arch }}
+    needs: [windows, macos, linux, linux-gui]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      # The server, with every client for its console to offer. Artifacts lose their mode bits.
+      - name: Pack
+        run: |
+          PACKAGE=varco-server-linux-${{ matrix.arch }}
+          mkdir -p "$PACKAGE/clients"
+          install -m 755 "artifacts/varco-linux-${{ matrix.arch }}" "$PACKAGE/varco"
+          install -m 644 deploy/varco.service "$PACKAGE/varco.service"
+          for client in artifacts/*; do
+            install -m 755 "$client" "$PACKAGE/clients/"
+          done
+          [ "$(ls "$PACKAGE/clients" | wc -l)" = 8 ]
+          tar -czf "$PACKAGE.tar.gz" "$PACKAGE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-package-${{ matrix.arch }}
+          path: varco-server-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos, linux, linux-gui]
+    needs: [windows, macos, linux, linux-gui, server-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -15,6 +15,7 @@ struct Harness {
     console: Arc<Console>,
     a: WorkspaceId,
     b: WorkspaceId,
+    clients: std::path::PathBuf,
 }
 
 fn harness(name: &str) -> Harness {
@@ -29,10 +30,12 @@ fn harness(name: &str) -> Harness {
     let identity = crate::tls::generate_identity().unwrap();
     let tls_config = crate::tls::server_config(&identity).unwrap();
     let relay = Arc::new(Relay::new(hub.clone(), tls_config));
+    let clients = dir.join("clients");
     Harness {
-        console: Console::new(hub, relay, [7; 32]),
+        console: Console::with_client_dirs(hub, relay, [7; 32], vec![clients.clone()]),
         a: a.id,
         b: b.id,
+        clients,
     }
 }
 
@@ -179,6 +182,8 @@ const ROUTES: &[(&str, &str, Needs)] = &[
     ("POST", "/api/tokens", Needs::Super),
     ("DELETE", "/api/tokens/{id}", Needs::Super),
     ("GET", "/api/tokens/{id}/secret", Needs::Super),
+    ("GET", "/api/downloads", Needs::Nothing),
+    ("GET", "/downloads/{file}", Needs::Nothing),
     ("GET", "/api/w/{ws}", Needs::Member),
     ("GET", "/api/w/{ws}/members", Needs::Member),
     ("POST", "/api/w/{ws}/members/kick", Needs::Member),
@@ -309,6 +314,7 @@ async fn the_permission_matrix_holds() {
                 .replace("{ws}", &h.a.to_string())
                 .replace("{id}", "no-such-id")
                 .replace("{client}", "no-such-client")
+                .replace("{file}", "no-such-file")
                 .replace("{user}", "999999");
             let method = Method::from_bytes(method.as_bytes()).unwrap();
             let body = (method != Method::GET).then(|| json!({}));
@@ -1266,6 +1272,151 @@ async fn health_says_nothing_but_whether_the_relay_listens() {
 
 const SSH_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl me@host";
+
+async fn copies_of_a_new_code(h: &Harness, public_addr: &str) -> Value {
+    h.store()
+        .set_setting(SETTING_PUBLIC_ADDR, public_addr)
+        .unwrap();
+    let codes = format!("/api/w/{}/codes", h.a);
+    let (_, created) = h.as_root(Method::POST, &codes, Some(json!({}))).await;
+    let id = created["id"].as_str().unwrap();
+    let (status, copies) = h
+        .as_root(Method::GET, &format!("{codes}/{id}/copies"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{copies}");
+    copies
+}
+
+#[tokio::test]
+async fn a_named_address_also_offers_codes_that_need_no_dns() {
+    let h = harness("copy-ip-lookup");
+    h.as_root(
+        Method::POST,
+        "/api/me/ssh-keys",
+        Some(json!({"public_key": SSH_KEY})),
+    )
+    .await;
+    let copies = copies_of_a_new_code(&h, "localhost:8443").await;
+    assert_eq!(copies["server"], "localhost:8443");
+    let ip = &copies["ip"];
+    assert_eq!(ip["address"], "127.0.0.1:8443", "{copies}");
+
+    let named = Credential::parse(copies["code"].as_str().unwrap()).unwrap();
+    let direct = Credential::parse(ip["code"].as_str().unwrap()).unwrap();
+    assert_eq!(named.server, "localhost:8443");
+    assert_eq!(direct.server, "127.0.0.1:8443");
+    assert_eq!(direct.pin, named.pin);
+    assert_eq!(direct.secret, named.secret);
+
+    let joint = Credential::parse(ip["keyed"][0]["code"].as_str().unwrap()).unwrap();
+    assert_eq!(joint.server, "127.0.0.1:8443");
+    assert_eq!(joint.secret, named.secret);
+    assert!(joint.ssh_pubkey.is_some());
+}
+
+#[tokio::test]
+async fn a_set_ip_wins_over_looking_one_up() {
+    let h = harness("copy-ip-set");
+    let (status, _) = h
+        .as_root(
+            Method::PUT,
+            "/api/settings",
+            Some(json!({"public_ip": " 198.51.100.9 "})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let copies = copies_of_a_new_code(&h, "localhost:8443").await;
+    assert_eq!(copies["ip"]["address"], "198.51.100.9:8443");
+
+    // Cleared, it goes back to looking up.
+    let (status, _) = h
+        .as_root(Method::PUT, "/api/settings", Some(json!({"public_ip": ""})))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let copies = copies_of_a_new_code(&h, "localhost:8443").await;
+    assert_eq!(copies["ip"]["address"], "127.0.0.1:8443");
+
+    let (status, _) = h
+        .as_root(
+            Method::PUT,
+            "/api/settings",
+            Some(json!({"public_ip": "198.51.100.9:8443"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn an_address_that_is_an_ip_offers_nothing_more() {
+    let h = harness("copy-ip-none");
+    for address in ["203.0.113.7:8443", "[2001:db8::1]:8443"] {
+        let copies = copies_of_a_new_code(&h, address).await;
+        assert_eq!(copies["ip"], Value::Null, "{address}");
+        assert_eq!(copies["ip_error"], Value::Null, "{address}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_lookup_still_gives_the_named_code() {
+    let h = harness("copy-ip-failed");
+    // A port out of range fails before any DNS, whose answers depend on the machine:
+    // some resolvers answer for names that do not exist.
+    let copies = copies_of_a_new_code(&h, "localhost:99999").await;
+    assert_eq!(copies["ip"], Value::Null);
+    assert!(copies["ip_error"].as_str().unwrap().contains("对外 IP"));
+    assert!(copies["code"].as_str().unwrap().starts_with("varco://"));
+    assert_eq!(copies["server"], "localhost:99999");
+}
+
+#[tokio::test]
+async fn anyone_can_list_and_download_the_clients_in_the_package() {
+    let h = harness("downloads");
+    let (status, _, catalog) = h
+        .send(Method::GET, "/api/downloads", &Credential_::None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(catalog["clients"], json!([]), "none shipped, none listed");
+    assert!(catalog["site"].as_str().unwrap().starts_with("https://"));
+
+    std::fs::create_dir_all(&h.clients).unwrap();
+    std::fs::write(h.clients.join("varco-linux-x64"), b"client bytes").unwrap();
+    std::fs::write(h.clients.join("not-a-client"), b"other").unwrap();
+    std::fs::write(h.clients.parent().unwrap().join("secret"), b"other").unwrap();
+
+    let (_, _, catalog) = h
+        .send(Method::GET, "/api/downloads", &Credential_::None, None)
+        .await;
+    assert_eq!(catalog["clients"].as_array().unwrap().len(), 1, "{catalog}");
+    assert_eq!(catalog["clients"][0]["file"], "varco-linux-x64");
+    assert_eq!(catalog["clients"][0]["size"], 12);
+
+    let (status, headers, body) = h
+        .send(
+            Method::GET,
+            "/downloads/varco-linux-x64",
+            &Credential_::None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "client bytes");
+    assert_eq!(headers["content-length"], "12");
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=\"varco-linux-x64\""
+    );
+
+    // On the list but not in the package, off the list, and out of the directory.
+    for path in [
+        "/downloads/varco-linux-arm64",
+        "/downloads/not-a-client",
+        "/downloads/..%2Fsecret",
+        "/downloads/%2e%2e%2fsecret",
+    ] {
+        let (status, _, _) = h.send(Method::GET, path, &Credential_::None, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+}
 
 #[tokio::test]
 async fn a_code_can_be_copied_again_with_each_of_my_keys() {

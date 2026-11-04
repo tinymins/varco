@@ -2,6 +2,7 @@
 //! provides TLS. Who may do what is decided in one place, the extractors below, so
 //! a handler that takes a [`Scoped`] cannot reach another workspace.
 mod account;
+mod downloads;
 mod system;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -108,10 +110,21 @@ pub struct Console {
     password_checks: Semaphore,
     /// Checked when the username does not exist, so a miss takes as long as a hit.
     decoy_hash: String,
+    /// Where the downloadable clients may be, in the order to look.
+    client_dirs: Vec<PathBuf>,
 }
 
 impl Console {
     pub fn new(hub: Arc<Hub>, relay: Arc<Relay>, pin: Pin) -> Arc<Self> {
+        Self::with_client_dirs(hub, relay, pin, downloads::default_dirs())
+    }
+
+    fn with_client_dirs(
+        hub: Arc<Hub>,
+        relay: Arc<Relay>,
+        pin: Pin,
+        client_dirs: Vec<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             hub,
             relay,
@@ -119,6 +132,7 @@ impl Console {
             limiter: Mutex::default(),
             password_checks: Semaphore::new(CONCURRENT_PASSWORD_CHECKS),
             decoy_hash: hash_password("decoy").expect("hashing a constant"),
+            client_dirs,
         })
     }
 
@@ -512,6 +526,8 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/style.css", get(stylesheet))
         .route("/healthz", get(s::healthz))
         .route("/metrics", get(s::metrics))
+        .route("/api/downloads", get(downloads::catalog))
+        .route("/downloads/{file}", get(downloads::download))
         .route("/api/login", post(a::login))
         .route("/api/logout", post(a::logout))
         .route("/api/me", get(a::me))

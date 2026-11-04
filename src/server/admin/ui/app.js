@@ -97,15 +97,48 @@ function showLogin() {
   me = null; pages = {}; current = { scope: null, tab: null };
   const user = input({ autocomplete: "username", required: true });
   const pass = input({ type: "password", autocomplete: "current-password" });
-  show(authPage("varco 管理后台", null,
-    formOf({ id: "login-form" }, async () => {
-      await api("POST", "login", { username: user.value, password: pass.value });
-      await boot();
-    },
-      field("用户名", user),
-      field("密码", pass),
-      formActions(submitButton("登录")))));
+  const form = formOf({ id: "login-form" }, async () => {
+    await api("POST", "login", { username: user.value, password: pass.value });
+    await boot();
+  },
+    field("用户名", user),
+    field("密码", pass),
+    formActions(submitButton("登录")));
+  const downloads = el("div", { id: "login-downloads", hidden: true });
+  const items = [["login", "登录"], ["downloads", "下载客户端"]];
+  // Both stay in the page, so looking at the downloads keeps what was typed.
+  const select = (key) => {
+    const next = tabs(items, key, select);
+    bar.replaceWith(next);
+    bar = next;
+    form.hidden = key !== "login";
+    downloads.hidden = key !== "downloads";
+    if (key === "downloads") {
+      viewDownloadList().then((list) => downloads.replaceChildren(list)).catch((error) => toast(error.message, "error"));
+    }
+  };
+  let bar = tabs(items, "login", select);
+  show(authPage("varco 管理后台", null, bar, form, downloads));
 }
+
+async function viewDownloadList() {
+  const { site, version, clients } = await api("GET", "downloads");
+  const platforms = [...new Set(clients.map((c) => c.platform))];
+  return el("div", { class: "downloads" },
+    el("p", {}, "官网：", el("a", { href: site, target: "_blank", rel: "noopener noreferrer" }, site.replace(/^https:\/\/|\/$/g, "")),
+      el("span", { class: "muted" }, "（最新版本和使用说明）")),
+    clients.length
+      ? [
+        el("p", { class: "muted" }, "也可以直接从这台服务端下载（版本 " + version + "）："),
+        platforms.map((platform) => el("div", { class: "download-row" },
+          el("strong", {}, platform),
+          el("span", { class: "download-links" }, clients.filter((c) => c.platform === platform).map((c) =>
+            el("a", { href: "downloads/" + c.file, download: c.file, title: c.file }, c.arch + " · " + bytes(c.size)))))),
+      ]
+      : el("p", { class: "muted" }, "这台服务端没有附带客户端，请到官网下载。"));
+}
+
+const viewDownloads = async () => card("下载客户端", {}, await viewDownloadList());
 
 function showChangePassword() {
   stopPolling();
@@ -210,7 +243,7 @@ function userMenu() {
 
 function drawApp() {
   const items = tabsFor();
-  if (current.tab !== "me" && !items.some(([key]) => key === current.tab)) current.tab = items[0]?.[0] ?? null;
+  if (current.tab !== "me" && current.tab !== "downloads" && !items.some(([key]) => key === current.tab)) current.tab = items[0]?.[0] ?? null;
   const scopeName = current.scope === "system" ? "系统管理" : myWorkspace()?.name;
   const content = el("main", { id: "content" });
   show(
@@ -219,7 +252,7 @@ function drawApp() {
       scopeName && el("span", { class: "topbar-scope", title: scopeName }, scopeName),
       el("span", { class: "topbar-spacer" }),
       userMenu()),
-    tabs([...items, ["me", "我的账号设置", { end: true }]], current.tab, (key) => { current.tab = key; drawApp(); }),
+    tabs([...items, ["downloads", "下载客户端", { end: true }], ["me", "我的账号设置", { end: true }]], current.tab, (key) => { current.tab = key; drawApp(); }),
     content,
   );
   // On a narrow screen the tab bar scrolls, and the chosen tab may be off the end.
@@ -307,12 +340,28 @@ function limitText(code) {
 
 async function showCodeCopies(id) {
   const copies = await api("GET", wsPath("/codes/" + id + "/copies"));
+  const rows = el("div", { class: "code-copies" });
+  const modes = el("div", { class: "address-modes" });
+  const draw = (useIp) => {
+    const shown = useIp ? copies.ip : copies;
+    rows.replaceChildren(
+      ...[
+        secretRow({ label: "默认 Code", hint: "只入网", secret: shown.code }),
+        copies.keyed.length
+          ? notice("联合 Code 让对方粘贴后入网并开启 SSH，持有对应私钥的人能远程控制对方电脑，只发给知情并同意的人。", "warn")
+          : el("p", { class: "muted" }, "在“我的账号设置”里添加 SSH 公钥后，这里会多出对应的联合 Code。"),
+        ...shown.keyed.map((key) => secretRow({ label: "联合 Code：" + key.name, hint: key.fingerprint, secret: key.code })),
+      ]);
+    if (!copies.ip) return;
+    modes.replaceChildren(
+      button("域名 " + copies.server, { id: "address-domain", size: "sm", variant: useIp ? undefined : "primary", onclick: () => draw(false) }),
+      button("IP " + copies.ip.address, { id: "address-ip", size: "sm", variant: useIp ? "primary" : undefined, onclick: () => draw(true) }));
+  };
+  draw(false);
   sheet({ title: "复制 Code" },
-    secretRow({ label: "默认 Code", hint: "只入网", secret: copies.code }),
-    copies.keyed.length
-      ? notice("联合 Code 让对方粘贴后入网并开启 SSH，持有对应私钥的人能远程控制对方电脑，只发给知情并同意的人。", "warn")
-      : el("p", { class: "muted" }, "在“我的账号设置”里添加 SSH 公钥后，这里会多出对应的联合 Code。"),
-    copies.keyed.map((key) => secretRow({ label: "联合 Code：" + key.name, hint: key.fingerprint, secret: key.code })));
+    copies.ip && [modes, el("p", { class: "muted" }, "对方 DNS 有故障时发 IP 版。服务器换 IP 后，IP 版 Code 会连不上。")],
+    copies.ip_error && notice(copies.ip_error, "warn"),
+    rows);
 }
 
 const CODE_KINDS = {
@@ -662,6 +711,7 @@ async function viewGlobalTokens() {
 async function viewSettings() {
   const settings = await api("GET", "settings");
   const addr = input({ id: "set-addr", mono: true, value: settings.public_addr ?? settings.suggested_public_addr });
+  const publicIp = input({ id: "set-public-ip", mono: true, value: settings.public_ip ?? "", placeholder: "留空表示自动解析" });
   const listen = input({ id: "set-listen", mono: true, value: settings.relay_listen ?? settings.suggested_relay_listen });
   const days = input({ id: "set-days", type: "number", min: "1", value: String(settings.history_days) });
   return card("服务设置", {},
@@ -669,9 +719,10 @@ async function viewSettings() {
       ? notice("中继正在监听 " + settings.relay_listening_on, "ok")
       : notice("中继没有在监听，请检查监听地址", "warn"),
     formOf({ id: "settings-form" }, changes(() => api("PUT", "settings", {
-      public_addr: addr.value, relay_listen: listen.value, history_days: Number(days.value),
+      public_addr: addr.value, public_ip: publicIp.value, relay_listen: listen.value, history_days: Number(days.value),
     }), "已保存"),
       field("对外地址", addr, { hint: "写进新 Code，已发出的 Code 仍指向旧地址" }),
+      field("对外 IP（可选）", publicIp, { hint: "用于复制 IP 版 Code。留空时由服务端解析对外地址的域名；服务器自己解析到内网地址时请手动填写" }),
       field("中继监听地址", listen, { hint: "修改时已连接的成员不受影响" }),
       field("连接历史和审计保留天数", days),
       formActions(submitButton("保存"))));
@@ -722,7 +773,7 @@ const VIEWS = {
   members: viewMembers, codes: viewCodes, bans: viewBans, connections: viewConnections,
   audit: viewAudit, tokens: viewTokens, admins: viewAdmins,
   workspaces: viewWorkspaces, users: viewUsers, sbans: viewGlobalBans, saudit: viewGlobalAudit,
-  stokens: viewGlobalTokens, settings: viewSettings, me: viewMe,
+  stokens: viewGlobalTokens, settings: viewSettings, me: viewMe, downloads: viewDownloads,
 };
 
 boot();

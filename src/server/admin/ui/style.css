@@ -195,6 +195,7 @@ p { margin: 0; }
   transition: color .12s;
 }
 .tab-end { margin-left: auto; }
+.tab-end ~ .tab-end { margin-left: 0; }
 .tab:hover { color: var(--text); }
 .tab:focus-visible { outline-offset: -2px; }
 .tab.is-active { color: var(--text); font-weight: 600; }
@@ -222,6 +223,17 @@ main > * { min-width: 0; }
 .auth-card { display: grid; gap: 12px; width: 100%; padding: 20px; }
 .auth-title { margin: 0; font-size: 16px; font-weight: 600; }
 .auth .form-stack .btn { width: 100%; }
+.auth-card .tabs { padding-inline: 0; background: none; }
+
+/* ---- Downloads and Code copies ---- */
+.downloads { display: grid; gap: 10px; }
+.downloads p { margin: 0; }
+.downloads a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.download-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; padding-top: 10px; border-top: 1px solid var(--line); }
+.download-links { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.code-copies { display: grid; gap: 12px; min-width: 0; }
+.address-modes { display: flex; flex-wrap: wrap; gap: 8px; }
+.address-modes .btn { overflow-wrap: anywhere; }
 
 /* ---- Badges and notices ---- */
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--text); font-size: 12px; white-space: nowrap; }

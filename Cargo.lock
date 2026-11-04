@@ -6783,7 +6783,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "varco"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -6816,6 +6816,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "tower",
  "tracing",

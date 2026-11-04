@@ -1,6 +1,6 @@
 [package]
 name = "varco"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 publish = false
 license = "MIT"
@@ -44,6 +44,7 @@ smoltcp = { version = "0.13", default-features = false, features = ["std", "medi
 slint = { version = "~1.18", optional = true, default-features = false, features = ["std", "compat-1-18", "backend-winit", "renderer-winit-software", "unstable-winit-030"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 argon2 = "0.6.0"
+tokio-util = { version = "0.7.20", features = ["io"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

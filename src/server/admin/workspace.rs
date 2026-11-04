@@ -7,14 +7,19 @@ use crate::credential::Credential;
 use crate::server::hub::{MemberView, NetworkStats};
 use crate::server::store::{
     parse_duration, parse_ip_target, unix_now, AdminView, AuditEntry, Ban, BanTarget, CodeLimits,
-    CodeRecord, ConnectionRecord, Kicked, Page, Role, TokenInfo, UserId, Workspace, WorkspaceId,
-    SETTING_PUBLIC_ADDR,
+    CodeRecord, ConnectionRecord, Kicked, Page, Role, SshKey, TokenInfo, UserId, Workspace,
+    WorkspaceId, SETTING_PUBLIC_ADDR, SETTING_PUBLIC_IP,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Copying a Code should not hang on a slow resolver.
+const IP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Empty means none. `Err` carries the message to show.
 pub(super) fn deadline(text: Option<&str>, now: u64) -> ApiResult<Option<u64>> {
@@ -218,12 +223,64 @@ pub struct KeyedCode {
     code: String,
 }
 
+/// The same Codes pointing straight at an IP, for machines whose DNS is broken.
+#[derive(Serialize)]
+pub struct IpCopies {
+    address: String,
+    code: String,
+    keyed: Vec<KeyedCode>,
+}
+
 /// The Code as it is, and once for each of the caller's own SSH keys. A token
 /// belongs to nobody, so it only gets the first.
 #[derive(Serialize)]
 pub struct CodeCopies {
+    server: String,
     code: String,
     keyed: Vec<KeyedCode>,
+    /// Absent when the address already is an IP, or none could be found.
+    ip: Option<IpCopies>,
+    /// Why none could be found.
+    ip_error: Option<String>,
+}
+
+fn keyed_codes(credential: &Credential, keys: &[SshKey]) -> ApiResult<Vec<KeyedCode>> {
+    keys.iter()
+        .map(|key| {
+            let parsed = ssh_store::parse_public_key(&key.public_key).map_err(internal)?;
+            Ok(KeyedCode {
+                name: key.name.clone(),
+                fingerprint: key.fingerprint.clone(),
+                code: credential.clone().with_ssh_pubkey(parsed).encode(),
+            })
+        })
+        .collect()
+}
+
+/// The IP to offer in place of the host, if the host is a name. A set IP wins: this
+/// server's own DNS may not answer what its clients' would. `Err` is the message to show.
+async fn direct_ip(
+    public_addr: &str,
+    configured: Option<String>,
+) -> Result<Option<String>, String> {
+    let host = public_addr
+        .rsplit_once(':')
+        .map_or(public_addr, |(host, _)| host);
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.parse::<IpAddr>().is_ok() {
+        return Ok(None);
+    }
+    if let Some(ip) = configured.filter(|ip| !ip.is_empty()) {
+        return Ok(Some(ip));
+    }
+    let failed = || format!("无法解析 {host} 的 IP，请让超管在服务设置里填写对外 IP");
+    let found = tokio::time::timeout(IP_LOOKUP_TIMEOUT, tokio::net::lookup_host(public_addr))
+        .await
+        .map_err(|_| failed())?
+        .map_err(|_| failed())?;
+    let ips: Vec<IpAddr> = found.map(|address| address.ip()).collect();
+    let chosen = ips.iter().find(|ip| ip.is_ipv4()).or_else(|| ips.first());
+    chosen.map(|ip| Some(ip.to_string())).ok_or_else(failed)
 }
 
 pub async fn code_copies(
@@ -244,21 +301,31 @@ pub async fn code_copies(
         Some(user) => store.ssh_keys(user)?,
         None => Vec::new(),
     };
-    let keyed = keys
-        .into_iter()
-        .map(|key| {
-            let parsed = ssh_store::parse_public_key(&key.public_key).map_err(internal)?;
-            Ok(KeyedCode {
-                name: key.name,
-                fingerprint: key.fingerprint,
-                code: credential.clone().with_ssh_pubkey(parsed).encode(),
-            })
-        })
-        .collect::<ApiResult<Vec<_>>>()?;
+    let keyed = keyed_codes(&credential, &keys)?;
+    let configured = store.setting(SETTING_PUBLIC_IP)?;
+    let (ip, ip_error) = match direct_ip(&credential.server, configured).await {
+        Ok(None) => (None, None),
+        Err(message) => (None, Some(message)),
+        Ok(Some(ip)) => {
+            let direct = credential
+                .clone()
+                .with_address(Some(&ip), None)
+                .map_err(internal)?;
+            let copies = IpCopies {
+                address: direct.server.clone(),
+                code: direct.encode(),
+                keyed: keyed_codes(&direct, &keys)?,
+            };
+            (Some(copies), None)
+        }
+    };
     console.audit(&scoped.actor, Some(id), "copy_code", &code);
     Ok(Json(CodeCopies {
         code: credential.encode(),
+        server: credential.server,
         keyed,
+        ip,
+        ip_error,
     }))
 }
 
