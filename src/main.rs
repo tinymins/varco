@@ -35,6 +35,14 @@ struct Args {
     /// 不创建虚拟网卡，只通过组网提供 SSH。传了公钥时默认开启，可用 --ssh-only=false 关闭
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
     ssh_only: Option<bool>,
+    /// 仅 SSH 模式转入后台时 SSH 以谁的身份运行：root 或 user（当前用户）。不传时询问，默认 root
+    #[cfg(unix)]
+    #[arg(long, value_enum, value_name = "WHO")]
+    ssh_as: Option<cli::SshAs>,
+    /// 命令行版连上后留在前台，不转入后台
+    #[cfg(unix)]
+    #[arg(long)]
+    foreground: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -57,12 +65,27 @@ enum Command {
         #[command(subcommand)]
         action: Option<ServerAction>,
     },
+    /// 结束在后台运行的命令行客户端
+    #[cfg(unix)]
+    Stop {
+        #[arg(long, hide = true, value_parser = clap::value_parser!(i32).range(1..))]
+        pid: Option<i32>,
+    },
     /// 内部使用：窗口程序拉起的提权进程
     #[cfg(unix)]
     #[command(hide = true)]
     Helper {
         #[arg(long)]
         socket: PathBuf,
+        #[arg(long)]
+        ssh_only: bool,
+    },
+    /// 内部使用：命令行客户端转入后台后的进程
+    #[cfg(unix)]
+    #[command(name = "__worker", hide = true)]
+    Worker {
+        #[arg(long)]
+        run_dir: PathBuf,
     },
 }
 
@@ -124,6 +147,7 @@ fn run_client(
     runtime: &tokio::runtime::Runtime,
     force_cli: bool,
     launch: Launch,
+    #[cfg(unix)] start: cli::Start,
 ) -> Result<ExitCode> {
     #[cfg(feature = "gui")]
     if !force_cli && std::env::var_os(cli::CREDENTIAL_ENV).is_none() {
@@ -139,7 +163,11 @@ fn run_client(
     }
     #[cfg(not(feature = "gui"))]
     let _ = force_cli;
-    runtime.block_on(cli::run(launch))
+    runtime.block_on(cli::run(
+        launch,
+        #[cfg(unix)]
+        start,
+    ))
 }
 
 fn main() -> Result<ExitCode> {
@@ -170,7 +198,16 @@ fn main() -> Result<ExitCode> {
                 ssh_pubkey: std::env::var(cli::SSH_PUBKEY_ENV).ok(),
                 ..Options::default()
             };
-            run_client(&runtime, args.cli, launch::load(options, environment))
+            run_client(
+                &runtime,
+                args.cli,
+                launch::load(options, environment),
+                #[cfg(unix)]
+                cli::Start {
+                    foreground: args.foreground,
+                    ssh_as: args.ssh_as,
+                },
+            )
         }
         Some(Command::Server {
             data_dir,
@@ -206,12 +243,19 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         #[cfg(unix)]
-        Some(Command::Helper { socket }) => {
-            runtime.block_on(varco::core::helper::run_helper(
-                &socket,
-                varco::core::tun::TunFactory,
-            ))?;
+        Some(Command::Stop { pid }) => cli::stop(pid),
+        #[cfg(unix)]
+        Some(Command::Helper { socket, ssh_only }) => {
+            use varco::core::helper::run_helper;
+            if ssh_only {
+                let factory = varco::core::netstack::NetstackFactory::new().0;
+                runtime.block_on(run_helper(&socket, factory))?;
+            } else {
+                runtime.block_on(run_helper(&socket, varco::core::tun::TunFactory))?;
+            }
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(unix)]
+        Some(Command::Worker { run_dir }) => runtime.block_on(cli::run_worker(run_dir)),
     }
 }

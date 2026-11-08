@@ -20,14 +20,83 @@ const STDIO_CHUNK: usize = 8192;
 
 pub type SharedMaster = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
 
-/// Our own secrets must not be inherited by a remote shell.
+/// The account this process runs as, from the password database.
+#[cfg(unix)]
+pub(super) struct Account {
+    pub name: OsString,
+    pub home: OsString,
+    pub shell: OsString,
+}
+
+/// Looked up by the effective uid, because an elevated process may still carry
+/// the environment of the user who started it.
+#[cfg(unix)]
+pub(super) fn account() -> Option<Account> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    let field = |text: *const libc::c_char| -> OsString {
+        if text.is_null() {
+            return OsString::new();
+        }
+        // SAFETY: getpwuid_r points the fields at NUL-terminated strings in `buf`.
+        OsStr::from_bytes(unsafe { CStr::from_ptr(text) }.to_bytes()).to_owned()
+    };
+    let mut buf = vec![0u8; 1024];
+    loop {
+        // SAFETY: passwd is plain data, and getpwuid_r writes only into `entry`
+        // and the `buf.len()` bytes of `buf`.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found = std::ptr::null_mut();
+        let result = unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                &mut entry,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        if result == libc::ERANGE && buf.len() < 1 << 20 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if result != 0 || found.is_null() {
+            return None;
+        }
+        return Some(Account {
+            name: field(entry.pw_name),
+            home: field(entry.pw_dir),
+            shell: field(entry.pw_shell),
+        });
+    }
+}
+
+/// Our own secrets must not be inherited by a remote shell. On Unix the
+/// identity variables describe the account the shell runs as, not the caller.
 fn scrubbed_env() -> Vec<(OsString, OsString)> {
-    std::env::vars_os()
+    #[allow(unused_mut)]
+    let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(name, _)| !name.to_string_lossy().starts_with("VARCO_"))
-        .collect()
+        .collect();
+    #[cfg(unix)]
+    if let Some(account) = account() {
+        let identity = [
+            ("HOME", account.home),
+            ("SHELL", account.shell),
+            ("USER", account.name.clone()),
+            ("LOGNAME", account.name),
+        ];
+        env.retain(|(name, _)| identity.iter().all(|(own, _)| name != own));
+        env.extend(identity.map(|(name, value)| (name.into(), value)));
+    }
+    env
 }
 
 fn work_dir() -> PathBuf {
+    #[cfg(unix)]
+    if let Some(home) = account().map(|a| a.home).filter(|h| !h.is_empty()) {
+        return home.into();
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -38,7 +107,7 @@ struct Program {
 
 #[cfg(unix)]
 fn default_shell() -> OsString {
-    if let Some(shell) = std::env::var_os("SHELL").filter(|s| !s.is_empty()) {
+    if let Some(shell) = account().map(|a| a.shell).filter(|s| !s.is_empty()) {
         return shell;
     }
     // A GUI app may start with almost no environment.

@@ -14,8 +14,10 @@ use super::netstack::{MeshEndpoint, MeshListener};
 use anyhow::Result;
 use ipnet::Ipv4Net;
 use russh::keys::{PrivateKey, PublicKey};
+use serde::{Deserialize, Serialize};
 pub use server::config as server_config;
 use server::SessionHandler;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,12 +41,24 @@ const BIND_GRACE: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// True when the remote shell has full administrator rights.
-pub const fn shell_is_admin() -> bool {
-    cfg!(windows)
+/// True when a remote shell run as `user` has full administrator rights.
+pub fn shell_is_admin(user: &str) -> bool {
+    cfg!(windows) || user == "root"
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Who remote sessions run as: whoever this process is running as.
+pub fn effective_user() -> String {
+    #[cfg(unix)]
+    return process::account().map_or_else(
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        || unsafe { libc::geteuid() }.to_string(),
+        |account| account.name.to_string_lossy().into_owned(),
+    );
+    #[cfg(windows)]
+    return std::env::var("USERNAME").unwrap_or_else(|_| "user".to_owned());
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SshState {
     Off,
     /// Waiting for the mesh address.
@@ -52,6 +66,8 @@ pub enum SshState {
     Listening {
         ip: Ipv4Addr,
         connections: usize,
+        /// The account remote sessions run as.
+        user: String,
     },
     Error(String),
 }
@@ -103,8 +119,17 @@ impl SshListener {
 pub struct SshService {
     pub state: watch::Receiver<SshState>,
     pub host_fingerprint: String,
-    stop: watch::Sender<bool>,
-    task: tokio::task::JoinHandle<()>,
+    stop: Stop,
+}
+
+enum Stop {
+    Local {
+        signal: watch::Sender<bool>,
+        task: tokio::task::JoinHandle<()>,
+    },
+    /// Asks the process that runs the server to turn it off.
+    #[cfg(unix)]
+    Remote(Box<dyn FnOnce() + Send>),
 }
 
 impl SshService {
@@ -131,15 +156,50 @@ impl SshService {
         Self {
             state,
             host_fingerprint,
-            stop,
-            task,
+            stop: Stop::Local { signal: stop, task },
         }
     }
 
-    /// Returns once every session and its processes are gone.
-    pub async fn stop(self) {
-        let _ = self.stop.send(true);
-        let _ = self.task.await;
+    /// A server run by another process: `state` follows its reports, and `off`
+    /// asks it to stop.
+    #[cfg(unix)]
+    pub(crate) fn remote(
+        host_fingerprint: String,
+        state: watch::Receiver<SshState>,
+        off: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            state,
+            host_fingerprint,
+            stop: Stop::Remote(Box::new(off)),
+        }
+    }
+
+    /// The future returns once every session and its processes are gone. The
+    /// request goes out right away, so it is never overtaken by a later start.
+    pub fn stop(self) -> impl Future<Output = ()> + Send {
+        let mut state = self.state;
+        let task = match self.stop {
+            Stop::Local { signal, task } => {
+                let _ = signal.send(true);
+                Some(task)
+            }
+            #[cfg(unix)]
+            Stop::Remote(off) => {
+                off();
+                None
+            }
+        };
+        async move {
+            match task {
+                Some(task) => {
+                    let _ = task.await;
+                }
+                None => {
+                    let _ = state.wait_for(|s| *s == SshState::Off).await;
+                }
+            }
+        }
     }
 }
 
@@ -314,7 +374,11 @@ pub async fn serve(
     mut stop: watch::Receiver<bool>,
 ) {
     let listener = listener.into();
-    state.send_replace(SshState::Listening { ip, connections: 0 });
+    state.send_replace(SshState::Listening {
+        ip,
+        connections: 0,
+        user: effective_user(),
+    });
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut sessions = tokio::task::JoinSet::new();
     loop {

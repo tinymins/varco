@@ -3,7 +3,7 @@
 //! machine stays reachable without any change to its network configuration.
 use super::engine::{Device, DeviceFactory, NetInfo};
 use super::error::FailReason;
-use super::ssh::{MAX_CONNECTIONS, PORT};
+use super::ssh::{ListenSource, MAX_CONNECTIONS, PORT};
 use bytes::Bytes;
 use rand::RngCore;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
@@ -73,6 +73,10 @@ impl DeviceFactory for NetstackFactory {
             listener,
         }));
         Ok(device)
+    }
+
+    fn ssh_source(&self) -> ListenSource {
+        ListenSource::Mesh(self.endpoint.subscribe())
     }
 }
 

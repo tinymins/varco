@@ -1,6 +1,7 @@
 //! Connect, keep alive and reconnect. The virtual NIC sits behind [`Device`] so
 //! everything here can be tested over real TLS without root.
 use super::error::FailReason;
+use super::ssh::ListenSource;
 use crate::credential::{encode_secret, Credential};
 use crate::proto::{
     ipv4_endpoints, read_frame, write_frame, Frame, Hello, Member, RejectReason, Welcome,
@@ -43,6 +44,10 @@ pub trait Device: Send + Sync + 'static {
 pub trait DeviceFactory: Send + Sync + 'static {
     type Device: Device;
     fn create(&self, net: &NetInfo) -> Result<Self::Device, FailReason>;
+    /// Where the SSH server takes connections from on the devices made here.
+    fn ssh_source(&self) -> ListenSource {
+        ListenSource::Os
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -65,12 +65,6 @@ fn show_key_validity(app: &App, text: &str) {
     }
 }
 
-fn login_name() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "user".to_owned())
-}
-
 fn show_ssh(app: &App, service: &SshService) {
     let state = service.state.borrow().clone();
     match state {
@@ -79,10 +73,15 @@ fn show_ssh(app: &App, service: &SshService) {
             app.set_ssh_status_color(AMBER);
             app.set_ssh_command(SharedString::new());
         }
-        SshState::Listening { ip, connections } => {
+        SshState::Listening {
+            ip,
+            connections,
+            user,
+        } => {
             app.set_ssh_status(format!("● 已开启 · {connections} 个连接").into());
             app.set_ssh_status_color(GREEN);
-            let command = format!("ssh -p {} {}@{ip}", ssh::PORT, login_name());
+            app.set_ssh_admin(ssh::shell_is_admin(&user));
+            let command = format!("ssh -p {} {user}@{ip}", ssh::PORT);
             app.set_ssh_command(command.into());
         }
         SshState::Error(message) => {
@@ -283,13 +282,7 @@ fn start_ssh(
     match saved.and_then(|()| ssh::prepare(&key)) {
         Ok((allowed, host_key)) => {
             let shown_key = from_package.then(|| store::fingerprint(&allowed));
-            let started = SshService::start(
-                runtime,
-                allowed,
-                host_key,
-                connection.status.clone(),
-                connection.ssh_source.clone(),
-            );
+            let started = connection.start_ssh(runtime, allowed, host_key);
             app.set_ssh_on(true);
             app.set_ssh_fingerprint(started.host_fingerprint.as_str().into());
             app.set_ssh_configured_key(shown_key.unwrap_or_default().into());
@@ -426,11 +419,7 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
         };
         let package_key = confirm_settings.granted_key(&credential);
         app.set_busy(true);
-        let connection = if app.get_ssh_only() {
-            backend::start_ssh_only(&confirm_runtime, credential)
-        } else {
-            backend::start(&confirm_runtime, credential)
-        };
+        let connection = backend::start(&confirm_runtime, credential, app.get_ssh_only());
         // Also on a retry: the server stops with every connection that fails.
         if let Some(key) = &package_key {
             show_key_validity(&app, key);
@@ -467,7 +456,9 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
         app.set_ssh_pubkey(key.as_str().into());
     }
     app.set_ssh_only(settings.ssh_only);
-    app.set_ssh_admin(ssh::shell_is_admin());
+    // What SSH runs as unless elevation is refused; once it listens, the
+    // account it actually runs as decides.
+    app.set_ssh_admin(true);
 
     let weak = app.as_weak();
     app.on_ssh_pubkey_edited(move |text| {
@@ -537,7 +528,23 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
         app.invoke_confirm(code.as_str().into());
     }
 
-    app.run()?;
+    // Closing the window only hides it: the connection carries on until the
+    // tray's quit.
+    let tray = Tray::new()?;
+    let weak = app.as_weak();
+    tray.on_show_window(move || {
+        if let Some(app) = weak.upgrade() {
+            let _ = app.show();
+        }
+    });
+    tray.on_quit(|| {
+        let _ = slint::quit_event_loop();
+    });
+    app.window()
+        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+    app.show()?;
+    tray.show()?;
+    slint::run_event_loop_until_quit()?;
 
     // Sessions end first, while the network they run over still exists.
     if let Some(service) = ssh_service.borrow_mut().take() {
@@ -545,7 +552,7 @@ pub fn run(runtime: Handle, launch: &Launch) -> Result<(), slint::PlatformError>
             let _ = tokio::time::timeout(SHUTDOWN_WAIT, service.stop()).await;
         });
     }
-    // Closing the window disconnects. Waiting lets the NIC go away cleanly.
+    // Quitting disconnects. Waiting lets the NIC go away cleanly.
     if let Some(mut active) = session.borrow_mut().take() {
         let _ = active.connection.stop.send(true);
         runtime.block_on(async {

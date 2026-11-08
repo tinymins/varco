@@ -13,6 +13,25 @@ component Row {
     }
 }
 
+/// Keeps the program reachable while its window is hidden.
+export component Tray inherits SystemTrayIcon {
+    icon: @image-url("../assets/icon/varco.png");
+    tooltip: "varco";
+    callback show-window();
+    callback quit();
+    clicked => { root.show-window(); }
+    Menu {
+        MenuItem {
+            title: "显示窗口";
+            activated => { root.show-window(); }
+        }
+        MenuItem {
+            title: "退出";
+            activated => { root.quit(); }
+        }
+    }
+}
+
 export component App inherits Window {
     title: "varco";
     icon: @image-url("../assets/icon/varco.png");
